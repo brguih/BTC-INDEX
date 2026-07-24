@@ -12,7 +12,7 @@ import streamlit as st
 from btcindex import cycle as cycle_mod
 from btcindex import engine
 from btcindex.sources import global_m2
-from btcindex.stats import episode_table
+from btcindex.stats import episode_table, episodes
 
 st.set_page_config(page_title="BTC INDEX", page_icon="B", layout="wide")
 
@@ -27,7 +27,7 @@ def get_raw(token: int) -> engine.RawData:
 
 def sidebar_controls(raw: engine.RawData):
     st.sidebar.header("Dados")
-    if st.sidebar.button("Atualizar dados agora", use_container_width=True):
+    if st.sidebar.button("Atualizar dados agora", width="stretch"):
         st.cache_data.clear()
         st.session_state["token"] = st.session_state.get("token", 0) + 1
         st.rerun()
@@ -149,6 +149,40 @@ def indicator_chart(ind, target: float, band: float, start: pd.Timestamp) -> go.
     return fig
 
 
+def funnel(active, targets, bands_used, index, gap):
+    """Quantos dias sobram a cada indicador adicionado ao 'E'.
+
+    Entra do menos para o mais restritivo, entao a linha em que o numero despenca
+    mostra qual criterio esta estrangulando a amostra.
+    """
+    masks = {k: ind.mask(targets[k], bands_used[k]).reindex(index, fill_value=False)
+             for k, ind in active.items()}
+    ordem = sorted(masks, key=lambda k: int(masks[k].sum()), reverse=True)
+
+    rows, cum, anterior = [], pd.Series(True, index=index), len(index)
+    retencao = {}
+    for k in ordem:
+        ind = active[k]
+        cum = cum & masks[k]
+        n = int(cum.sum())
+        # o gargalo e quem corta mais do que sobrou, nao quem corta mais em termos
+        # absolutos - o primeiro filtro sempre parece grande porque parte do universo inteiro
+        retencao[ind.label] = n / anterior if anterior else 0.0
+        rows.append({
+            "passo": f"+ {ind.label}",
+            "criterio": f"{targets[k]:.2f} +/- {bands_used[k]:.2f}",
+            "dias sozinho": int(masks[k].sum()),
+            "dias apos o E": n,
+            "episodios": len(episodes(cum[cum].index, gap_days=gap)),
+            "sobrou do passo anterior": f"{(n / anterior * 100) if anterior else 0:.0f}%",
+        })
+        anterior = n
+    cabeca = {"passo": "universo do periodo", "criterio": "sem filtro", "dias sozinho": len(index),
+              "dias apos o E": len(index), "episodios": 1, "sobrou do passo anterior": "100%"}
+    gargalo = min(retencao, key=retencao.get) if retencao else "-"
+    return pd.DataFrame([cabeca] + rows), gargalo
+
+
 def show_table(table: pd.DataFrame):
     cols = ["janela", "n_dias", "n_episodios", "media_%", "mediana_%", "desvio_%",
             "p10_%", "p90_%", "acerto_%", "baseline_mediana_%"]
@@ -157,7 +191,8 @@ def show_table(table: pd.DataFrame):
         "mediana_%": "Mediana %", "desvio_%": "Desvio %", "p10_%": "P10 %", "p90_%": "P90 %",
         "acerto_%": "Positivos %", "baseline_mediana_%": "Baseline mediana %",
     })
-    st.dataframe(nice, hide_index=True, use_container_width=True)
+    nice.attrs = {}  # os attrs carregam Timestamps que o Arrow nao serializa
+    st.dataframe(nice, hide_index=True, width="stretch")
 
 
 def match_caption(res, inds, bands):
@@ -218,15 +253,32 @@ def main():
             st.warning(w)
 
     # ------------------------------------------------------------------- alvos
-    st.sidebar.header("Alvos (default = hoje)")
+    st.sidebar.header("Alvos")
+    st.sidebar.caption(
+        "Travado = o alvo acompanha o valor de hoje e muda junto com os parametros. "
+        "Destrave so para simular um cenario hipotetico."
+    )
     targets = {}
     for key, ind in inds.items():
         if not use[key]:
             continue
         cur = float(ind.current)
-        targets[key] = st.sidebar.number_input(
-            ind.label, value=round(cur, 3), step=0.1 if ind.band_mode != "circular" else 1.0, key=f"t_{key}"
-        )
+        lock = st.sidebar.checkbox(f"{ind.label}: usar valor de hoje", value=True, key=f"lock_{key}")
+        if lock:
+            targets[key] = cur
+            st.sidebar.caption(f"alvo = {cur:.3f} ({ind.unit})")
+        else:
+            # a chave carrega o valor de hoje: se um parametro mudar o valor atual,
+            # nasce um widget novo ja inicializado no numero certo, em vez de o
+            # Streamlit reaproveitar o valor velho guardado no session_state
+            targets[key] = st.sidebar.number_input(
+                f"Alvo simulado - {ind.label}",
+                value=round(cur, 3),
+                step=1.0 if ind.band_mode == "circular" else 0.1,
+                key=f"t_{key}_{cur:.6f}",
+            )
+            if abs(targets[key] - cur) > 1e-9:
+                st.sidebar.caption(f"simulando: hoje o valor real e {cur:.3f}")
 
     active = {k: v for k, v in inds.items() if use[k]}
     if not active:
@@ -256,14 +308,14 @@ def main():
             show_table(tbl)
             c1, c2 = st.columns([3, 2])
             c1.plotly_chart(price_chart(panel.loc[start:], res.dates, "Dias casados sobre o preco"),
-                            use_container_width=True)
+                            width="stretch")
             win = c2.selectbox("Janela do histograma", list(windows), index=len(windows) - 1, key=f"h_{key}")
-            c2.plotly_chart(distribution_chart(panel.loc[start:], res.dates, win), use_container_width=True)
+            c2.plotly_chart(distribution_chart(panel.loc[start:], res.dates, win), width="stretch")
             st.plotly_chart(indicator_chart(ind, targets[key], res.bands_used[key], start),
-                            use_container_width=True)
+                            width="stretch")
             with st.expander("Episodios"):
                 st.dataframe(episode_table(panel.loc[start:], res.mask, windows, gap), hide_index=True,
-                             use_container_width=True)
+                             width="stretch")
             if ind.note:
                 st.caption(ind.note)
             st.divider()
@@ -271,7 +323,29 @@ def main():
     # ---------------------------------------------------------------- composto
     with tab_comp:
         st.subheader("Interseccao de todos os indicadores selecionados")
-        st.caption(" E ".join(f"{i.label} em {targets[k]:.2f} +/- {bands[k]}" for k, i in active.items()))
+        st.markdown(
+            "Procura os dias do passado que satisfizeram **todos** os criterios "
+            "**ao mesmo tempo, no mesmo dia**:\n"
+            + "\n".join(
+                f"- {i.label} entre **{targets[k] - bands[k]:.2f}** e **{targets[k] + bands[k]:.2f}** {i.unit}"
+                for k, i in active.items()
+            )
+        )
+        with st.expander("Como ler esta aba"):
+            st.markdown(
+                """
+- **Dias casados**: total de dias do passado que passaram em todos os filtros.
+- **Episodios independentes**: blocos separados por pelo menos o intervalo definido na barra
+  lateral. Cinco episodios de vinte dias sao **cinco** observacoes, nao cem - e o numero de
+  episodios que diz se o resultado tem lastro.
+- **Fator de relaxamento**: 1,00x significa que as bandas que voce escolheu bastaram. Acima
+  disso, todas as bandas foram multiplicadas por esse fator ate a amostra alcancar o N minimo.
+  Quanto maior o fator, mais frouxa a pergunta que esta sendo respondida.
+- O **funil** no fim da aba mostra quantos dias cada criterio derruba, um a um.
+- Os dias mais recentes entram na contagem de dias casados mas nao nas colunas de retorno
+  futuro que ainda nao existem - por isso a coluna Dias encolhe nas janelas mais longas.
+"""
+            )
         tbl, res = engine.analyse(panel, active, targets, bands, windows, min_n=min_n, relax=relax,
                                   gap_days=gap, date_range=date_range)
         match_caption(res, active, bands)
@@ -282,23 +356,23 @@ def main():
         show_table(tbl)
         c1, c2 = st.columns([3, 2])
         c1.plotly_chart(price_chart(panel.loc[start:], res.dates, "Dias casados sobre o preco"),
-                        use_container_width=True)
+                        width="stretch")
         win = c2.selectbox("Janela do histograma", list(windows), index=len(windows) - 1, key="h_comp")
-        c2.plotly_chart(distribution_chart(panel.loc[start:], res.dates, win), use_container_width=True)
+        c2.plotly_chart(distribution_chart(panel.loc[start:], res.dates, win), width="stretch")
         st.markdown("**Episodios**")
         st.dataframe(episode_table(panel.loc[start:], res.mask, windows, gap), hide_index=True,
-                     use_container_width=True)
+                     width="stretch")
 
-        limitante = None
         if len(active) > 1:
-            counts = {}
-            for k, ind in active.items():
-                m = ind.mask(targets[k], res.bands_used[k]).reindex(panel.loc[start:].index, fill_value=False)
-                counts[ind.label] = int(m.sum())
-            limitante = min(counts, key=counts.get)
-            st.caption("Dias casados por indicador isolado (com as bandas finais): " +
-                       " | ".join(f"{k}: {v}" for k, v in counts.items()) +
-                       f" -- o mais restritivo e {limitante}.")
+            st.divider()
+            st.markdown("**Funil de filtragem** - de onde vem o tamanho da amostra")
+            fun, gargalo = funnel(active, targets, res.bands_used, panel.loc[start:].index, gap)
+            st.dataframe(fun, hide_index=True, width="stretch")
+            st.caption(
+                f"Os indicadores entram do menos para o mais restritivo. O gargalo e **{gargalo}**: "
+                "e o criterio que mais derruba a amostra, e portanto o primeiro lugar onde mexer "
+                "(alargar a banda dele) se voce quiser mais dias sem relaxar todo o resto."
+            )
 
     # ------------------------------------------------------------------- dados
     with tab_dados:
@@ -308,7 +382,7 @@ def main():
                         ("Net Liquidity (FRED)", raw.netliq)]:
             d = s.dropna()
             rows.append({"serie": name, "inicio": d.index.min().date(), "fim": d.index.max().date(), "obs": len(d)})
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
         st.markdown("**Componentes do M2 global (US$ trilhoes)**")
         cov = []
@@ -317,12 +391,12 @@ def main():
             cov.append({"componente": global_m2.COMPONENT_LABELS[col], "codigo": col,
                         "inicio": s.index.min().date(), "ultimo dado real": s.index.max().date(),
                         "valor US$ tri": round(float(s.iloc[-1]), 2)})
-        st.dataframe(pd.DataFrame(cov), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(cov), hide_index=True, width="stretch")
         m2_level = global_m2.chain_link(raw.m2_components[list(params.m2_components)])
         st.metric("M2 global hoje", f"US$ {m2_level.iloc[-1]:.1f} tri")
 
         st.markdown("**Intervalos entre halvings**")
-        st.dataframe(cycle_mod.observed_intervals(), hide_index=True, use_container_width=True)
+        st.dataframe(cycle_mod.observed_intervals(), hide_index=True, width="stretch")
 
         export = panel.copy()
         for k, ind in inds.items():
