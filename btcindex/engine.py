@@ -144,6 +144,8 @@ def analyse(
     gap_days: int = 45,
     date_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     anchor_window: str | None = None,
+    max_factor: float = 10.0,
+    fixed_factor: float | None = None,
 ) -> tuple[pd.DataFrame, matcher.MatchResult]:
     longest = anchor_window or max(windows, key=lambda k: windows[k])
     res = matcher.match(
@@ -155,6 +157,8 @@ def analyse(
         relax=relax,
         window_col=f"fwd_{longest}",
         date_range=date_range,
+        max_factor=max_factor,
+        fixed_factor=fixed_factor,
     )
     scope = df if date_range is None else df.loc[date_range[0] : date_range[1]]
     table = stats.summarize(scope, res.mask, windows, gap_days=gap_days)

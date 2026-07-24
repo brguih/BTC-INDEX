@@ -51,16 +51,38 @@ def sidebar_controls(raw: engine.RawData):
         max_value=pd.Timestamp.today(),
         help="Retornos de 2012-2014 sao de outra ordem de grandeza e distorcem as medias.",
     )
-    min_n = st.sidebar.number_input("N minimo de dias na amostra", 5, 500, 30, 5)
-    relax = st.sidebar.checkbox(
-        "Relaxar bandas automaticamente ate atingir o N minimo", value=True,
-        help="Se a interseccao estrita nao alcanca o N minimo, todas as bandas sao multiplicadas pelo mesmo fator.",
-    )
     gap = st.sidebar.number_input(
         "Intervalo minimo entre episodios (dias)", 5, 365, 45, 5,
         help="Dias casados separados por menos que isso contam como um mesmo episodio.",
     )
-    return windows, pd.Timestamp(start), int(min_n), relax, int(gap)
+
+    st.sidebar.header("Fator das bandas")
+    modo = st.sidebar.radio(
+        "Modo",
+        ["Automatico ate um teto", "Fator fixo", "Sem relaxamento"],
+        key="modo_fator",
+        help="O fator multiplica TODAS as bandas ao mesmo tempo. 2x com banda de +/-2 pontos "
+             "no Fear & Greed vira +/-4 pontos.",
+    )
+    cfg = {"min_n": 30, "relax": True, "max_factor": 10.0, "fixed": None}
+    if modo == "Automatico ate um teto":
+        cfg["min_n"] = int(st.sidebar.number_input("N minimo de dias na amostra", 5, 500, 30, 5))
+        cfg["max_factor"] = float(st.sidebar.slider(
+            "Teto do fator", 1.0, 20.0, 5.0, 0.25,
+            help="A busca sobe pelos degraus 1; 1,25; 1,5; 2; 2,5; 3; 4; 5; 7; 10 e para no primeiro "
+                 "que alcanca o N minimo, sem nunca passar deste teto.",
+        ))
+    elif modo == "Fator fixo":
+        cfg["fixed"] = float(st.sidebar.slider(
+            "Fator aplicado as bandas", 0.25, 20.0, 1.0, 0.25,
+            help="Abaixo de 1 aperta as bandas em vez de alargar.",
+        ))
+        st.sidebar.caption("Nesse modo o N minimo nao se aplica: vale exatamente o fator escolhido.")
+    else:
+        cfg["relax"] = False
+        st.sidebar.caption("As bandas valem como voce configurou, mesmo que a amostra fique minuscula.")
+
+    return windows, pd.Timestamp(start), int(gap), cfg
 
 
 def indicator_controls(raw: engine.RawData):
@@ -195,17 +217,26 @@ def show_table(table: pd.DataFrame):
     st.dataframe(nice, hide_index=True, width="stretch")
 
 
-def match_caption(res, inds, bands):
-    parts = []
-    for k, ind in inds.items():
-        parts.append(f"{ind.label}: +/-{res.bands_used[k]:.2f}")
-    txt = " | ".join(parts)
+def match_caption(res, inds, bands, cfg):
+    txt = " | ".join(f"{ind.label}: +/-{res.bands_used[k]:.2f}" for k, ind in inds.items())
+
+    if cfg.get("fixed") is not None:
+        msg = f"Fator fixo de {res.factor:.2f}x (N minimo nao se aplica). Bandas: {txt}"
+        (st.caption if res.factor == 1.0 else st.info)(msg)
+        if res.n_days_with_window < 1:
+            st.error("Nenhum dia casado tem retorno futuro conhecido nessa janela.")
+        return
+
     if res.exhausted and res.n_days_with_window < 1:
-        st.error(f"Nenhum dia do passado casa com esses criterios, nem alargando 10x as bandas. Bandas finais: {txt}")
+        st.error(
+            f"Nenhum dia do passado casa com esses criterios, nem no teto de {cfg['max_factor']:.2f}x. "
+            f"Bandas finais: {txt}"
+        )
     elif res.exhausted:
         st.warning(
-            f"Amostra abaixo do N minimo mesmo alargando as bandas em {res.factor:.2f}x "
-            f"({res.n_days} dias). Trate os numeros como indicativos. Bandas finais: {txt}"
+            f"Amostra abaixo do N minimo no teto de {cfg['max_factor']:.2f}x "
+            f"({res.n_days} dias casados). Trate os numeros como indicativos ou suba o teto. "
+            f"Bandas finais: {txt}"
         )
     elif res.relaxed:
         st.info(f"Bandas alargadas em {res.factor:.2f}x para alcancar o N minimo. Bandas usadas: {txt}")
@@ -218,7 +249,7 @@ def main():
     token = st.session_state.get("token", 0)
     raw = get_raw(token)
 
-    windows, start, min_n, relax, gap = sidebar_controls(raw)
+    windows, start, gap, cfg = sidebar_controls(raw)
     params, use, bands = indicator_controls(raw)
     params.windows = windows
 
@@ -299,12 +330,14 @@ def main():
         for key, ind in active.items():
             st.subheader(ind.label)
             tbl, res = engine.analyse(panel, {key: ind}, {key: targets[key]}, {key: bands[key]},
-                                      windows, min_n=min_n, relax=relax, gap_days=gap, date_range=date_range)
+                                      windows, min_n=cfg["min_n"], relax=cfg["relax"], gap_days=gap,
+                                      date_range=date_range, max_factor=cfg["max_factor"],
+                                      fixed_factor=cfg["fixed"])
             st.caption(
                 f"Alvo {targets[key]:.2f} {ind.unit} | historico desde "
                 f"{ind.series.dropna().index.min():%d/%m/%Y}"
             )
-            match_caption(res, {key: ind}, bands)
+            match_caption(res, {key: ind}, bands, cfg)
             show_table(tbl)
             c1, c2 = st.columns([3, 2])
             c1.plotly_chart(price_chart(panel.loc[start:], res.dates, "Dias casados sobre o preco"),
@@ -339,16 +372,18 @@ def main():
   lateral. Cinco episodios de vinte dias sao **cinco** observacoes, nao cem - e o numero de
   episodios que diz se o resultado tem lastro.
 - **Fator de relaxamento**: 1,00x significa que as bandas que voce escolheu bastaram. Acima
-  disso, todas as bandas foram multiplicadas por esse fator ate a amostra alcancar o N minimo.
-  Quanto maior o fator, mais frouxa a pergunta que esta sendo respondida.
+  disso, todas as bandas foram multiplicadas por esse fator. Quanto maior o fator, mais frouxa
+  a pergunta que esta sendo respondida - controle o comportamento em *Fator das bandas*,
+  na barra lateral, e veja o custo de cada degrau na tabela de sensibilidade.
 - O **funil** no fim da aba mostra quantos dias cada criterio derruba, um a um.
 - Os dias mais recentes entram na contagem de dias casados mas nao nas colunas de retorno
   futuro que ainda nao existem - por isso a coluna Dias encolhe nas janelas mais longas.
 """
             )
-        tbl, res = engine.analyse(panel, active, targets, bands, windows, min_n=min_n, relax=relax,
-                                  gap_days=gap, date_range=date_range)
-        match_caption(res, active, bands)
+        tbl, res = engine.analyse(panel, active, targets, bands, windows, min_n=cfg["min_n"],
+                                  relax=cfg["relax"], gap_days=gap, date_range=date_range,
+                                  max_factor=cfg["max_factor"], fixed_factor=cfg["fixed"])
+        match_caption(res, active, bands, cfg)
         c = st.columns(3)
         c[0].metric("Dias casados", res.n_days)
         c[1].metric("Episodios independentes", len(tbl.attrs.get("episodios", [])))
@@ -362,6 +397,29 @@ def main():
         st.markdown("**Episodios**")
         st.dataframe(episode_table(panel.loc[start:], res.mask, windows, gap), hide_index=True,
                      width="stretch")
+
+        st.divider()
+        st.markdown("**Sensibilidade ao fator** - o que cada fator entrega de amostra")
+        from btcindex.matcher import EXPANSION_STEPS, sensitivity
+
+        fatores = sorted({*EXPANSION_STEPS, round(res.factor, 2)})
+        sens = sensitivity(active, targets, bands, panel, windows, fatores, date_range)
+        sens.insert(1, "bandas", [
+            " | ".join(f"{bands[k] * f:.2f}" for k in active) for f in sens["fator"]
+        ])
+        st.dataframe(
+            sens.style.apply(
+                lambda col: ["background-color: rgba(232,131,58,0.22)" if v == res.factor else "" for v in col],
+                subset=["fator"],
+            ),
+            hide_index=True, width="stretch",
+        )
+        st.caption(
+            f"Ordem das bandas: {' | '.join(i.label for i in active.values())}. "
+            "A coluna *dias* conta todos os dias casados; as colunas *com 1m/3m/6m/12m* contam so os "
+            "que ja tem aquele retorno futuro. O fator em destaque e o que esta em uso. "
+            "Escolha olhando o custo: cada degrau compra amostra vendendo semelhanca com hoje."
+        )
 
         if len(active) > 1:
             st.divider()

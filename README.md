@@ -28,6 +28,22 @@ Os dados ficam em `data/cache/*.csv`. A interface tem um botão **Atualizar dado
 | **Net Liquidity do Fed** | balanço do Fed − conta do Tesouro − reverse repo | 2003 → hoje | idem |
 | **Ciclo do BTC** | dias decorridos desde a âncora do ciclo | 2012-11 → hoje | âncora (halving/topo/fundo), comprimento do ciclo, banda ± dias |
 
+### Sobre o fator das bandas
+
+A interseção estrita de três indicadores costuma devolver quase nenhum dia. O **fator**
+multiplica todas as bandas ao mesmo tempo, e você escolhe como ele se comporta em
+**Fator das bandas**, na barra lateral:
+
+| Modo | O que faz |
+|---|---|
+| **Automático até um teto** | Sobe pelos degraus 1; 1,25; 1,5; 2; 2,5; 3; 4; 5; 7; 10 e para no primeiro que alcança o N mínimo, sem passar do teto que você definir. Se bater no teto sem chegar lá, avisa. |
+| **Fator fixo** | Aplica exatamente o fator escolhido e ignora o N mínimo. Abaixo de 1 aperta as bandas em vez de alargar. |
+| **Sem relaxamento** | Vale a banda configurada, doa a quem doer. |
+
+A aba Composto traz a **tabela de sensibilidade**: quantos dias cada fator entrega e quais as
+bandas resultantes, com o fator em uso destacado. Cada degrau compra amostra vendendo
+semelhança com hoje — a tabela mostra o preço antes de você pagar.
+
 ### Sobre o ciclo
 
 Os halvings **não** são de 1460 dias. Intervalos observados: **1319**, **1402** e **1435** dias.

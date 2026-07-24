@@ -19,6 +19,25 @@ from .indicators import Indicator
 EXPANSION_STEPS = [1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 7.0, 10.0]
 
 
+def ladder(max_factor: float = 10.0, fixed_factor: float | None = None, relax: bool = True) -> list[float]:
+    """Escada de fatores que a busca vai tentar, em ordem.
+
+    fixed_factor manda: usa exatamente esse fator, sem procurar.
+    Senao percorre os degraus padrao ate o teto, e inclui o proprio teto quando
+    ele cai entre dois degraus (teto 3,7 -> ..., 3,0, 3,7).
+    """
+    if fixed_factor is not None:
+        return [float(fixed_factor)]
+    if not relax:
+        return [1.0]
+    steps = [s for s in EXPANSION_STEPS if s <= max_factor + 1e-9]
+    if not steps:
+        return [float(max_factor)]
+    if steps[-1] < max_factor - 1e-9:
+        steps.append(float(max_factor))
+    return steps
+
+
 @dataclass
 class MatchResult:
     mask: pd.Series
@@ -58,6 +77,8 @@ def match(
     window_col: str | None = None,
     date_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     exclude_recent_days: int = 0,
+    max_factor: float = 10.0,
+    fixed_factor: float | None = None,
 ) -> MatchResult:
     """Devolve a mascara dos dias casados, relaxando as bandas se necessario.
 
@@ -65,6 +86,8 @@ def match(
     (dias sem retorno futuro conhecido nao contam para o N minimo).
     exclude_recent_days: ignora os ultimos N dias, cujo retorno futuro ainda
     nao existe, evitando que a amostra pareca maior do que e.
+    max_factor: teto do relaxamento automatico.
+    fixed_factor: fixa o fator e ignora o N minimo (controle manual).
     """
     index = panel.index
     if date_range is not None:
@@ -72,7 +95,7 @@ def match(
     if exclude_recent_days > 0:
         index = index[index <= index.max() - pd.Timedelta(days=exclude_recent_days)]
 
-    steps = EXPANSION_STEPS if relax else [1.0]
+    steps = ladder(max_factor=max_factor, fixed_factor=fixed_factor, relax=relax)
     last_mask, last_factor = None, 1.0
     for factor in steps:
         mask = _combine(indicators, targets, bands, index, factor)
@@ -98,6 +121,30 @@ def match(
         relaxed=last_factor > 1.0,
         exhausted=True,
     )
+
+
+def sensitivity(
+    indicators: dict[str, Indicator],
+    targets: dict[str, float],
+    bands: dict[str, float],
+    panel: pd.DataFrame,
+    windows: dict[str, int],
+    factors: list[float] | None = None,
+    date_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
+) -> pd.DataFrame:
+    """Quantos dias cada fator entrega, para escolher o fator olhando o custo."""
+    index = panel.index
+    if date_range is not None:
+        index = index[(index >= date_range[0]) & (index <= date_range[1])]
+    factors = factors or EXPANSION_STEPS
+    rows = []
+    for f in factors:
+        mask = _combine(indicators, targets, bands, index, f)
+        row = {"fator": f, "dias": int(mask.sum())}
+        for label in windows:
+            row[f"com {label}"] = _useful(mask, panel, f"fwd_{label}")
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def _useful(mask: pd.Series, panel: pd.DataFrame, window_col: str | None) -> int:
