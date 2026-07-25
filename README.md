@@ -99,13 +99,6 @@ Os halvings **não** são de 1460 dias. Intervalos observados: **1319**, **1402*
 O default do projeto é **1435** e a âncora default é o halving, a única conhecida em tempo real
 (topos e fundos só se conhecem depois do fato). O próximo halving é projetado para março/2028.
 
-### Sobre o lead da liquidez
-
-O valor do indicador de liquidez no dia `t` é a variação percentual da liquidez em `N` semanas
-medida `lead` dias **antes** de `t`. Com o default de 70 dias (10 semanas), o sinal de hoje usa
-M2 de ~10 semanas atrás — que é dado já publicado, o que resolve de quebra a defasagem de
-publicação das fontes oficiais.
-
 ## Estrutura
 
 ```
@@ -125,7 +118,8 @@ tests/                  testes do motor, sem rede
 ### Adicionar um indicador novo
 
 1. Crie a fonte em `btcindex/sources/`, devolvendo uma `pd.Series` diária.
-2. Em `engine.build_indicators`, monte um `Indicator` com `band_mode` `abs`, `rel` ou `circular`.
+2. Em `engine.build_indicators`, monte um `Indicator` com `band_mode` `abs`, `pct`, `rel` ou
+   `circular`. Se ele tiver lead, use `_indicador_de_variacao`, que já deixa o shift reancorável.
 3. Adicione o controle no `app.py`.
 
 Nada em `matcher.py`, `stats.py` ou na aba de resultados precisa mudar.
@@ -155,6 +149,7 @@ Nada em `matcher.py`, `stats.py` ou na aba de resultados precisa mudar.
 | M4 Reino Unido | Bank of England `LPMAUYM` | não |
 | Câmbio | FRED `DEXUSEU`, `DEXCHUS`, `DEXJPUS`, `DEXUSUK` | não |
 | Net Liquidity | FRED `WALCL`, `WTREGEN`, `RRPONTSYD` | não |
+| Juro real 10a | FRED `DFII10` | não |
 
 As séries de M2 estrangeiro **do FRED** (`MYAGM2EZM196N`, `MYAGM2JPM189N`, `MABMM301*`) foram
 descontinuadas entre 2017 e 2023 e não servem para atualização diária — por isso cada país vem
