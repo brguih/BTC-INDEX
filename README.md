@@ -42,10 +42,40 @@ O preço do BTC é buscado de forma incremental: havendo cache, só o trecho que
 
 | Indicador | O que é | Histórico | Parâmetros |
 |---|---|---|---|
-| **Fear & Greed** | índice de sentimento 0–100 da alternative.me | 2018-02 → hoje | banda ± pontos |
-| **M2 global (USD)** | M2 de EUA + Zona do Euro + China + Japão + Reino Unido convertido a dólar | 1999 → hoje | janela de variação (semanas), *lead* em dias, países no agregado, banda ± p.p. |
+| **Fear & Greed** | índice de sentimento 0–100 da alternative.me | 2018-02 → hoje | banda ± pontos ou ± percentil |
+| **M2 global (USD)** | M2 de EUA + Zona do Euro + China + Japão + Reino Unido convertido a dólar | 1999 → hoje | janela de variação (semanas), *lead centro a centro*, países no agregado, banda |
+| **Juro real 10a** | juro real de 10 anos dos EUA (TIPS), sinal invertido: positivo = afrouxamento | 2003 → hoje | idem |
 | **Net Liquidity do Fed** | balanço do Fed − conta do Tesouro − reverse repo | 2003 → hoje | idem |
 | **Ciclo do BTC** | dias decorridos desde a âncora do ciclo | 2012-11 → hoje | âncora (halving/topo/fundo), comprimento do ciclo, banda ± dias |
+
+### O lead é medido de centro a centro
+
+A janela de variação já olha para trás: um delta de 8 semanas terminando em `τ` tem centro de
+massa em `τ−28d`. O retorno futuro de horizonte `H` tem centro em `t+H/2`. Logo:
+
+    lead efetivo = shift + janela/2 + horizonte/2
+
+Um shift fixo de 70 dias em todas as janelas testava, na prática, **20 semanas** de lead na
+janela de 12 meses. Por isso o parâmetro é o **lead centro a centro** e o shift de cada janela
+é derivado dele. O default de **91 dias** foi medido, não herdado: o pico da correlação cruzada
+está em +91d, com correlação contemporânea de apenas +0,04 — as 13 semanas do CrossBorder, não
+as 10 populares.
+
+Horizontes longos não têm como ficar alinhados (6 meses já consome 91 dias só na sua metade):
+o shift satura em zero, o lead efetivo estoura, e a interface avisa.
+
+### Bandas por percentil
+
+Sinais fracos e monotônicos não aparecem numa banda estreita em torno de um valor. O que informa
+é **em que parte da distribuição** hoje está: ±12,5 pontos percentuais é a largura de um quartil,
+±10 um quintil, ±5 um decil. A distribuição de referência é a do período filtrado.
+
+### Aviso sobre o M2 global
+
+Cerca de dois terços da variância do sinal vêm do **câmbio**, não de criação de moeda: congelando
+o câmbio, a volatilidade da variação de 8 semanas cai de 1,71 pp para 0,63 pp, e a correlação com
+o BTC cai de +0,08 para **+0,03**. Na prática ele funciona como um sinal de dólar. E o famoso
+"88–91% de correlação" é correlação de **níveis** de duas séries que sobem; em variação dá +0,08.
 
 ### Sobre o fator das bandas
 

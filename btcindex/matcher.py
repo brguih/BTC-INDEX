@@ -62,8 +62,9 @@ def _combine(
 ) -> pd.Series:
     mask = pd.Series(True, index=index)
     for key, ind in indicators.items():
-        m = ind.mask(targets[key], bands[key] * factor).reindex(index, fill_value=False)
-        mask &= m
+        # o index vai junto porque no modo percentil a distribuicao de referencia
+        # e a do periodo analisado
+        mask &= ind.mask(targets[key], bands[key] * factor, index=index)
     return mask
 
 

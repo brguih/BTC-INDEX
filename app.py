@@ -85,19 +85,56 @@ def sidebar_controls(raw: engine.RawData):
     return windows, pd.Timestamp(start), int(gap), cfg
 
 
-def indicator_controls(raw: engine.RawData):
-    st.sidebar.header("Indicadores")
-    p = engine.Params()
+LARGURAS = {"quartil (+/-12,5)": 12.5, "quintil (+/-10)": 10.0, "decil (+/-5)": 5.0}
 
+
+def controle_banda(key: str, padrao_abs: float, rotulo_abs: str, minimo: float, maximo: float,
+                   passo: float) -> tuple[str, float]:
+    """Banda em unidade absoluta ou em posicao na distribuicao.
+
+    O modo percentil existe porque sinais fracos e monotonicos (liquidez, juro)
+    nao aparecem numa banda estreita em torno de um valor: o que informa e em que
+    parte da distribuicao o dia de hoje esta.
+    """
+    tipo = st.radio("Tipo de banda", ["absoluta", "percentil"], key=f"bt_{key}", horizontal=True,
+                    help="Percentil compara a POSICAO de hoje na distribuicao: +/-12,5 pontos "
+                         "percentuais e exatamente a largura de um quartil.")
+    if tipo == "absoluta":
+        return "abs", st.number_input(rotulo_abs, minimo, maximo, padrao_abs, passo, key=f"b_{key}")
+
+    largura = st.selectbox("Largura", [*LARGURAS, "personalizado"], key=f"bp_{key}")
+    if largura == "personalizado":
+        return "pct", st.number_input("Banda +/- pontos percentuais de posicao", 0.5, 50.0, 12.5,
+                                      0.5, key=f"bpc_{key}")
+    return "pct", LARGURAS[largura]
+
+
+def indicator_controls(raw: engine.RawData):
+    st.sidebar.header("Lead da liquidez")
+    p = engine.Params()
+    p.align_lead = st.sidebar.checkbox(
+        "Alinhar o lead a cada janela (centro a centro)", value=True, key="align",
+        help="A janela de variacao ja olha para tras. O lead real e "
+             "shift + janela/2 + horizonte/2, entao o shift precisa encolher conforme o horizonte "
+             "cresce. Desligado, aplica o mesmo shift bruto em todas as janelas (comportamento antigo).",
+    )
+    p.ref_window = st.sidebar.selectbox(
+        "Janela de referencia (graficos e episodios)", list(p.windows), index=1, key="refw",
+        help="Com o lead alinhado cada janela tem sua propria amostra; os graficos mostram esta.",
+    )
+
+    st.sidebar.header("Indicadores")
     with st.sidebar.expander("Fear & Greed", expanded=True):
         use_fng = st.checkbox("Usar", value=True, key="use_fng")
-        band_fng = st.number_input("Banda +/- pontos", 0.5, 50.0, 2.0, 0.5, key="b_fng")
+        modo_fng, band_fng = controle_banda("fng", 2.0, "Banda +/- pontos", 0.5, 50.0, 0.5)
 
     with st.sidebar.expander("M2 global", expanded=True):
         use_m2 = st.checkbox("Usar", value=True, key="use_m2")
         p.m2_weeks = st.number_input("Janela de variacao (semanas)", 1, 104, 8, 1, key="m2w")
-        p.m2_lead = st.number_input("Lead sobre o BTC (dias)", 0, 365, 70, 5, key="m2l",
-                                    help="O BTC responde a liquidez com atraso; 70 dias = 10 semanas.")
+        p.m2_lead = st.number_input(
+            "Lead centro a centro (dias)", 0, 365, engine.LEAD_PADRAO, 7, key="m2l",
+            help="Medido: o pico da correlacao cruzada com o BTC esta em 91 dias (13 semanas).",
+        )
         comps = st.multiselect(
             "Paises no agregado",
             list(global_m2.DEFAULT_COMPONENTS),
@@ -106,13 +143,22 @@ def indicator_controls(raw: engine.RawData):
             key="m2c",
         )
         p.m2_components = tuple(comps) if comps else global_m2.DEFAULT_COMPONENTS
-        band_m2 = st.number_input("Banda +/- p.p.", 0.01, 10.0, 0.25, 0.05, key="b_m2")
+        modo_m2, band_m2 = controle_banda("m2", 0.25, "Banda +/- p.p.", 0.01, 10.0, 0.05)
+
+    with st.sidebar.expander("Juro real 10a", expanded=True):
+        use_ry = st.checkbox("Usar", value=True, key="use_ry")
+        p.real_weeks = st.number_input("Janela de variacao (semanas)", 1, 104, 8, 1, key="ryw")
+        p.real_lead = st.number_input("Lead centro a centro (dias)", 0, 365, engine.LEAD_PADRAO, 7,
+                                      key="ryl")
+        modo_ry, band_ry = controle_banda("ry", 0.10, "Banda +/- p.p.", 0.01, 5.0, 0.01)
 
     with st.sidebar.expander("Net Liquidity do Fed", expanded=False):
+        st.caption("Sinal fraco e instavel entre regimes; desligado por padrao.")
         use_nl = st.checkbox("Usar", value=False, key="use_nl")
         p.netliq_weeks = st.number_input("Janela de variacao (semanas)", 1, 104, 8, 1, key="nlw")
-        p.netliq_lead = st.number_input("Lead sobre o BTC (dias)", 0, 365, 70, 5, key="nll")
-        band_nl = st.number_input("Banda +/- p.p.", 0.05, 20.0, 1.0, 0.05, key="b_nl")
+        p.netliq_lead = st.number_input("Lead centro a centro (dias)", 0, 365, engine.LEAD_PADRAO,
+                                        7, key="nll")
+        modo_nl, band_nl = controle_banda("nl", 1.0, "Banda +/- p.p.", 0.05, 20.0, 0.05)
 
     with st.sidebar.expander("Ciclo do BTC", expanded=True):
         use_cy = st.checkbox("Usar", value=True, key="use_cy")
@@ -121,9 +167,13 @@ def indicator_controls(raw: engine.RawData):
                                        cycle_mod.DEFAULT_CYCLE_DAYS, 5, key="cyd")
         band_cy = st.number_input("Banda +/- dias", 1.0, 200.0, 20.0, 1.0, key="b_cy")
 
-    use = {"fng": use_fng, "m2_delta": use_m2, "netliq_delta": use_nl, "cycle": use_cy}
-    bands = {"fng": band_fng, "m2_delta": band_m2, "netliq_delta": band_nl, "cycle": band_cy}
-    return p, use, bands
+    use = {"fng": use_fng, "m2_delta": use_m2, "real_yield": use_ry,
+           "netliq_delta": use_nl, "cycle": use_cy}
+    bands = {"fng": band_fng, "m2_delta": band_m2, "real_yield": band_ry,
+             "netliq_delta": band_nl, "cycle": band_cy}
+    modos = {"fng": modo_fng, "m2_delta": modo_m2, "real_yield": modo_ry,
+             "netliq_delta": modo_nl, "cycle": "circular"}
+    return p, use, bands, modos
 
 
 # -------------------------------------------------------------------- graficos
@@ -205,6 +255,32 @@ def funnel(active, targets, bands_used, index, gap):
     return pd.DataFrame([cabeca] + rows), gargalo
 
 
+def mostrar_lead(det: pd.DataFrame, align: bool):
+    """Mostra o shift de cada janela e avisa quando o lead alvo e inalcancavel.
+
+    Um horizonte de 6 meses ja consome 91 dias so na sua metade, entao nenhum
+    shift consegue entregar um lead de 91 dias nessa janela: o shift satura em
+    zero e o lead efetivo estoura. Melhor dizer isso do que devolver um numero
+    com cara de alinhado.
+    """
+    if not align or det.empty or "lead efetivo (d)" not in det:
+        return
+    d = det.dropna(subset=["lead efetivo (d)"])
+    if d.empty:
+        return
+    with st.expander("Lead aplicado em cada janela"):
+        st.dataframe(d, hide_index=True, width="stretch")
+    fora = d[d["lead efetivo (d)"] > d["lead alvo (d)"] + 7]
+    if not fora.empty:
+        js = ", ".join(dict.fromkeys(fora["janela"]))
+        st.warning(
+            f"Janelas {js}: o horizonte e longo demais para o lead pedido; o shift saturou em zero "
+            f"e o lead efetivo chega a {int(fora['lead efetivo (d)'].max())} dias. "
+            "Nessas janelas o indicador de liquidez esta fora de alinhamento - trate os numeros "
+            "como descritivos, nao como teste do efeito de lead."
+        )
+
+
 def show_table(table: pd.DataFrame):
     cols = ["janela", "n_dias", "n_episodios", "media_%", "mediana_%", "desvio_%",
             "p10_%", "p90_%", "acerto_%", "baseline_mediana_%"]
@@ -250,11 +326,14 @@ def main():
     raw = get_raw(token)
 
     windows, start, gap, cfg = sidebar_controls(raw)
-    params, use, bands = indicator_controls(raw)
+    params, use, bands, modos = indicator_controls(raw)
     params.windows = windows
 
     panel = engine.build_panel(raw, windows)
     inds = engine.build_indicators(raw, params, panel.index)
+    for k, modo in modos.items():
+        if k in inds and modo != "circular":
+            inds[k].band_mode = modo
     today = panel.index.max()
     date_range = (start, today)
 
@@ -273,12 +352,12 @@ def main():
     cards[1].metric("Fear & Greed", f"{fng_v:.0f}", classify(fng_v))
     cards[2].metric(f"M2 global {params.m2_weeks}s", f"{inds['m2_delta'].current:+.2f}%",
                     f"lead {params.m2_lead}d")
-    cards[3].metric(f"Net Liquidity {params.netliq_weeks}s", f"{inds['netliq_delta'].current:+.2f}%",
-                    f"lead {params.netliq_lead}d")
+    cards[3].metric(f"Juro real 10a {params.real_weeks}s", f"{inds['real_yield'].current:+.2f}pp",
+                    "queda = afrouxamento")
     cd = inds["cycle"].current
     cards[4].metric("Dia do ciclo", f"{cd:.0f}", f"{cd / params.cycle_days * 100:.0f}% do ciclo")
 
-    for key in ("m2_delta", "netliq_delta"):
+    for key in ("m2_delta", "netliq_delta", "real_yield"):
         w = engine.stale_warning(inds[key], today)
         if w:
             st.warning(w)
@@ -289,15 +368,18 @@ def main():
         "Travado = o alvo acompanha o valor de hoje e muda junto com os parametros. "
         "Destrave so para simular um cenario hipotetico."
     )
-    targets = {}
+    targets, locked = {}, {}
+    escopo = panel.loc[start:].index
     for key, ind in inds.items():
         if not use[key]:
             continue
         cur = float(ind.current)
         lock = st.sidebar.checkbox(f"{ind.label}: usar valor de hoje", value=True, key=f"lock_{key}")
+        locked[key] = lock
         if lock:
             targets[key] = cur
-            st.sidebar.caption(f"alvo = {cur:.3f} ({ind.unit})")
+            pct = ind.percentil(cur, escopo)
+            st.sidebar.caption(f"alvo = {cur:.3f} ({ind.unit}) | percentil {pct:.0f}")
         else:
             # a chave carrega o valor de hoje: se um parametro mudar o valor atual,
             # nasce um widget novo ja inicializado no numero certo, em vez de o
@@ -329,16 +411,18 @@ def main():
 
         for key, ind in active.items():
             st.subheader(ind.label)
-            tbl, res = engine.analyse(panel, {key: ind}, {key: targets[key]}, {key: bands[key]},
-                                      windows, min_n=cfg["min_n"], relax=cfg["relax"], gap_days=gap,
-                                      date_range=date_range, max_factor=cfg["max_factor"],
-                                      fixed_factor=cfg["fixed"])
+            tbl, res, det = engine.analyse(panel, {key: ind}, {key: targets[key]}, {key: bands[key]},
+                                           windows, min_n=cfg["min_n"], relax=cfg["relax"], gap_days=gap,
+                                           date_range=date_range, max_factor=cfg["max_factor"],
+                                           fixed_factor=cfg["fixed"], align_lead=params.align_lead,
+                                           ref_window=params.ref_window, locked=locked)
             st.caption(
                 f"Alvo {targets[key]:.2f} {ind.unit} | historico desde "
                 f"{ind.series.dropna().index.min():%d/%m/%Y}"
             )
             match_caption(res, {key: ind}, bands, cfg)
             show_table(tbl)
+            mostrar_lead(det, params.align_lead)
             c1, c2 = st.columns([3, 2])
             c1.plotly_chart(price_chart(panel.loc[start:], res.dates, "Dias casados sobre o preco"),
                             width="stretch")
@@ -380,13 +464,16 @@ def main():
   futuro que ainda nao existem - por isso a coluna Dias encolhe nas janelas mais longas.
 """
             )
-        tbl, res = engine.analyse(panel, active, targets, bands, windows, min_n=cfg["min_n"],
-                                  relax=cfg["relax"], gap_days=gap, date_range=date_range,
-                                  max_factor=cfg["max_factor"], fixed_factor=cfg["fixed"])
+        tbl, res, det = engine.analyse(panel, active, targets, bands, windows, min_n=cfg["min_n"],
+                                       relax=cfg["relax"], gap_days=gap, date_range=date_range,
+                                       max_factor=cfg["max_factor"], fixed_factor=cfg["fixed"],
+                                       align_lead=params.align_lead, ref_window=params.ref_window,
+                                       locked=locked)
         match_caption(res, active, bands, cfg)
+        mostrar_lead(det, params.align_lead)
         c = st.columns(3)
         c[0].metric("Dias casados", res.n_days)
-        c[1].metric("Episodios independentes", len(tbl.attrs.get("episodios", [])))
+        c[1].metric("Episodios independentes", len(episodes(res.dates, gap_days=gap)))
         c[2].metric("Fator de relaxamento", f"{res.factor:.2f}x")
         show_table(tbl)
         c1, c2 = st.columns([3, 2])
@@ -476,6 +563,46 @@ def main():
 3. Selecionam-se os dias do passado em que o indicador esteve dentro da banda em torno do alvo.
 4. Calculam-se media, mediana, desvio, P10/P90 e taxa de dias positivos dos retornos futuros
    desses dias, sempre ao lado do baseline (todos os dias do mesmo periodo).
+
+### O lead e medido de centro a centro
+
+A janela de variacao ja olha para tras: um delta de 8 semanas terminando em `tau` tem centro
+de massa em `tau-28d`. O retorno futuro de horizonte `H` tem centro em `t+H/2`. Entao
+
+    lead efetivo = shift + janela/2 + horizonte/2
+
+e um shift fixo de 70 dias em todas as janelas testava, na pratica, 20 semanas de lead na
+janela de 12 meses. Por isso o parametro na barra lateral e o **lead centro a centro**, e o
+shift de cada janela e derivado dele: `shift = lead - janela/2 - horizonte/2`.
+
+O lead de 91 dias que vem por padrao foi medido, nao herdado: o pico da correlacao cruzada
+entre a variacao de 8 semanas da liquidez e a do BTC esta em +91 dias, com correlacao
+contemporanea de apenas +0,04. Sao as 13 semanas do CrossBorder, nao as 10 populares.
+
+Consequencia incomoda: horizontes longos nao tem como ficar alinhados. Um horizonte de 6
+meses ja consome 91 dias so na sua metade, entao o shift satura em zero e o lead efetivo
+estoura. A tabela "Lead aplicado em cada janela" mostra isso, e a pagina avisa.
+
+### Bandas por percentil
+
+Sinais fracos e monotonicos nao aparecem numa banda estreita em torno de um valor. Com
+correlacao de 0,3, o que informa e **em que parte da distribuicao** o dia de hoje esta, nao
+o valor exato. A banda por percentil compara posicao: +/-12,5 pontos percentuais e a largura
+de um quartil, +/-10 um quintil, +/-5 um decil. A distribuicao de referencia e a do periodo
+filtrado, entao mudar a data inicial muda o que significa "mesmo quartil".
+
+### O M2 global e, em boa parte, um sinal de dolar
+
+Convertendo M2 de China, Zona do Euro, Japao e Reino Unido para dolar, o cambio entra na
+conta como se fosse criacao de moeda. Medido: a volatilidade da variacao de 8 semanas cai de
+1,71 pp para 0,63 pp quando o cambio e congelado, e a correlacao do sinal com o dolar caindo
+e de +0,74. Pior: **com o cambio congelado, a correlacao com o BTC cai de +0,08 para +0,03**.
+O pouco de sinal que existe vem do dolar, nao da expansao monetaria. O indicador continua
+util - mas saiba que ele esta medindo o dolar.
+
+E o numero famoso de "88% a 91% de correlacao entre M2 e bitcoin" e correlacao de **niveis**
+de duas series que sobem: em log-nivel da +0,95 aqui tambem. Em variacao, que e o que se pode
+negociar, da +0,08.
 
 ### O que olhar com desconfianca
 

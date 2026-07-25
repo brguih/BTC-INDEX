@@ -7,7 +7,7 @@ deve custar uma rodada de rede.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
@@ -17,16 +17,49 @@ from .cycle import DEFAULT_CYCLE_DAYS
 from .sources import btc_price, fear_greed, fred, global_m2, net_liquidity
 
 
+# Lead verdadeiro medido: o pico da correlacao cruzada entre a variacao de 8
+# semanas da liquidez e a variacao de 8 semanas do BTC fica em +91 dias, tanto
+# para o M2 global quanto para o juro real. E o numero centro a centro, nao o
+# shift bruto - ver shift_para_janela().
+LEAD_PADRAO = 91
+
+
 @dataclass
 class Params:
     windows: dict[str, int] = field(default_factory=lambda: dict(panel_mod.WINDOWS))
     m2_weeks: int = 8
-    m2_lead: int = 70
+    m2_lead: int = LEAD_PADRAO
     m2_components: tuple[str, ...] = global_m2.DEFAULT_COMPONENTS
     netliq_weeks: int = 8
-    netliq_lead: int = 70
+    netliq_lead: int = LEAD_PADRAO
+    real_weeks: int = 8
+    real_lead: int = LEAD_PADRAO
     cycle_anchor: str = "halving"
     cycle_days: int = DEFAULT_CYCLE_DAYS
+    align_lead: bool = True
+    ref_window: str = "3m"
+
+
+def shift_para_janela(lead: int, janela_dias: int, horizonte_dias: int) -> int:
+    """Converte um lead centro a centro no deslocamento que a serie precisa.
+
+    A janela de variacao ja olha para tras: um delta de 8 semanas terminando em
+    tau tem centro de massa em tau-28d. O retorno futuro de horizonte H tem
+    centro em t+H/2. Entao o lead efetivo e
+
+        lead = shift + janela/2 + horizonte/2
+
+    e o shift que realiza um lead alvo encolhe conforme o horizonte cresce.
+    Aplicar um shift fixo de 70 dias a todas as janelas, como era antes, testava
+    na pratica 20 semanas de lead na janela de 12 meses - muito alem do efeito
+    real, o que apagava o sinal.
+    """
+    return max(0, int(round(lead - janela_dias / 2 - horizonte_dias / 2)))
+
+
+def lead_efetivo(shift: int, janela_dias: int, horizonte_dias: int) -> int:
+    """O caminho inverso: qual lead centro a centro um shift bruto representa."""
+    return int(round(shift + janela_dias / 2 + horizonte_dias / 2))
 
 
 @dataclass
@@ -35,13 +68,15 @@ class RawData:
     fng: pd.Series
     m2_components: pd.DataFrame
     netliq: pd.Series
+    real_yield: pd.Series
     fetched_at: pd.Timestamp
 
 
 # series do FRED usadas direto pelo painel (a da China e buscada dentro do
 # proprio fetcher dela, entao fica de fora para dois threads nao escreverem o
 # mesmo arquivo de cache)
-FRED_SERIES = ("WM2NS", "DEXUSEU", "DEXCHUS", "DEXJPUS", "DEXUSUK", "WALCL", "WTREGEN", "RRPONTSYD")
+FRED_SERIES = ("WM2NS", "DEXUSEU", "DEXCHUS", "DEXJPUS", "DEXUSUK", "WALCL", "WTREGEN",
+               "RRPONTSYD", "DFII10")
 
 
 def prefetch(force: bool = False, max_workers: int = 14) -> dict[str, str]:
@@ -84,6 +119,7 @@ def load_raw(force: bool = False) -> RawData:
         fng=fear_greed.series(),
         m2_components=global_m2.components_usd_tn(),
         netliq=net_liquidity.series(),
+        real_yield=fred.series("DFII10"),
         fetched_at=pd.Timestamp.now(),
     )
 
@@ -113,38 +149,115 @@ def build_indicators(raw: RawData, p: Params, index: pd.DatetimeIndex) -> dict[s
 
     comps = [c for c in p.m2_components if c in raw.m2_components.columns]
     m2_level = global_m2.chain_link(raw.m2_components[comps])
-    m2_last_real = raw.m2_components[comps].dropna(how="all").index.max()
-    m2 = ind_mod.Indicator(
+    inds["m2_delta"] = _indicador_de_variacao(
         key="m2_delta",
-        label=f"M2 global - variacao em {p.m2_weeks}s (lead {p.m2_lead}d)",
-        series=(m2_level.pct_change(p.m2_weeks * 7) * 100).shift(p.m2_lead),
-        unit=f"% em {p.m2_weeks} semanas",
-        band_mode="abs",
-        default_band=0.25,
-        band_label="+/- pontos percentuais",
-        note="M2 de " + "+".join(comps) + " em USD, agregado encadeado. Publicacao mensal com defasagem; "
-        "o lead desloca o sinal para tras, entao o valor de hoje costuma usar dado ja publicado.",
-        last_real_date=m2_last_real,
-        meta={"weeks": p.m2_weeks, "lead_days": p.m2_lead, "level": m2_level, "components": tuple(comps)},
+        nome="M2 global",
+        base=m2_level.pct_change(p.m2_weeks * 7) * 100,
+        weeks=p.m2_weeks,
+        lead=p.m2_lead,
+        unidade=f"% em {p.m2_weeks} semanas",
+        banda_padrao=0.25,
+        rotulo_banda="+/- pontos percentuais",
+        note="M2 de " + "+".join(comps) + " em USD, agregado encadeado. ATENCAO: cerca de dois tercos "
+        "da variancia deste sinal vem do cambio, nao de criacao de moeda - com o cambio congelado a "
+        "correlacao com o BTC cai de +0,08 para +0,03. Na pratica ele funciona como um sinal de dolar.",
+        last_real=raw.m2_components[comps].dropna(how="all").index.max(),
+        p=p,
+        index=index,
+        extra={"level": m2_level, "components": tuple(comps)},
     )
-    inds["m2_delta"] = ind_mod.align(m2, index)
 
-    nl = ind_mod.Indicator(
+    inds["netliq_delta"] = _indicador_de_variacao(
         key="netliq_delta",
-        label=f"Net Liquidity Fed - variacao em {p.netliq_weeks}s (lead {p.netliq_lead}d)",
-        series=(raw.netliq.pct_change(p.netliq_weeks * 7) * 100).shift(p.netliq_lead),
-        unit=f"% em {p.netliq_weeks} semanas",
-        band_mode="abs",
-        default_band=1.0,
-        band_label="+/- pontos percentuais",
-        note="Balanco do Fed - TGA - Reverse Repo (FRED). Semanal/diaria, sem defasagem, desde 2003. So EUA.",
-        last_real_date=raw.netliq.dropna().index.max(),
-        meta={"weeks": p.netliq_weeks, "lead_days": p.netliq_lead, "level": raw.netliq},
+        nome="Net Liquidity Fed",
+        base=raw.netliq.pct_change(p.netliq_weeks * 7) * 100,
+        weeks=p.netliq_weeks,
+        lead=p.netliq_lead,
+        unidade=f"% em {p.netliq_weeks} semanas",
+        banda_padrao=1.0,
+        rotulo_banda="+/- pontos percentuais",
+        note="Balanco do Fed - TGA - Reverse Repo (FRED). So EUA. Sinal fraco e instavel: spearman de "
+        "+0,27 ate 2020 e +0,09 de 2021 em diante, porque a composicao mudou (o RRP foi de zero a "
+        "US$ 2,5 tri e voltou a zero). Use com desconfianca.",
+        last_real=raw.netliq.dropna().index.max(),
+        p=p,
+        index=index,
+        extra={"level": raw.netliq},
     )
-    inds["netliq_delta"] = ind_mod.align(nl, index)
+
+    inds["real_yield"] = _indicador_de_variacao(
+        key="real_yield",
+        nome="Juro real 10a (queda)",
+        base=-raw.real_yield.diff(p.real_weeks * 7),
+        weeks=p.real_weeks,
+        lead=p.real_lead,
+        unidade=f"pp de queda em {p.real_weeks} semanas",
+        banda_padrao=0.10,
+        rotulo_banda="+/- pontos percentuais",
+        note="Juro real de 10 anos dos EUA (TIPS, FRED DFII10, diario desde 2003), com o sinal "
+        "invertido: positivo = juro caindo = afrouxamento. Antecedente confirmado - o pico da "
+        "correlacao cruzada esta em +91 dias e o contemporaneo e so +0,11, e ele sobrevive ao "
+        "controle pelo momento do proprio BTC. E o mais ortogonal ao sentimento (0,09) e ao ciclo (0,01).",
+        last_real=raw.real_yield.dropna().index.max(),
+        p=p,
+        index=index,
+        extra={"level": raw.real_yield},
+    )
 
     inds["cycle"] = ind_mod.build_cycle(index, anchor=p.cycle_anchor, cycle_days=p.cycle_days)
     return inds
+
+
+def _indicador_de_variacao(key, nome, base, weeks, lead, unidade, banda_padrao,
+                           rotulo_banda, note, last_real, p, index, extra=None):
+    """Monta um indicador de variacao com o lead ja resolvido para a janela de referencia.
+
+    A serie sem deslocamento fica em meta['delta_base'] para que a analise possa
+    reancorar o shift em cada janela (ver indicador_para_janela).
+    """
+    janela = weeks * 7
+    base = base.reindex(index)
+    horizonte_ref = p.windows.get(p.ref_window, 91)
+    shift = shift_para_janela(lead, janela, horizonte_ref) if p.align_lead else lead
+    rotulo_lead = (f"lead {lead}d centro a centro -> shift {shift}d" if p.align_lead
+                   else f"shift bruto {shift}d")
+    return ind_mod.Indicator(
+        key=key,
+        label=f"{nome} - variacao em {weeks}s ({rotulo_lead})",
+        series=base.shift(shift),
+        unit=unidade,
+        band_mode="abs",
+        default_band=banda_padrao,
+        band_label=rotulo_banda,
+        note=note,
+        last_real_date=last_real,
+        meta={
+            "weeks": weeks,
+            "window_days": janela,
+            "lead_days": lead,
+            "align_lead": p.align_lead,
+            "shift_aplicado": shift,
+            "delta_base": base,
+            **(extra or {}),
+        },
+    )
+
+
+def indicador_para_janela(ind: ind_mod.Indicator, horizonte_dias: int) -> ind_mod.Indicator:
+    """Reancora o shift do indicador para um horizonte especifico.
+
+    Indicadores sem lead (Fear & Greed, ciclo) voltam inalterados.
+    """
+    if not ind.meta.get("align_lead") or "delta_base" not in ind.meta:
+        return ind
+    shift = shift_para_janela(ind.meta["lead_days"], ind.meta["window_days"], horizonte_dias)
+    if shift == ind.meta.get("shift_aplicado"):
+        return ind
+    return replace(
+        ind,
+        series=ind.meta["delta_base"].shift(shift),
+        meta={**ind.meta, "shift_aplicado": shift},
+    )
 
 
 def load(params: Params | None = None, force: bool = False):
@@ -187,23 +300,66 @@ def analyse(
     anchor_window: str | None = None,
     max_factor: float = 10.0,
     fixed_factor: float | None = None,
-) -> tuple[pd.DataFrame, matcher.MatchResult]:
-    longest = anchor_window or max(windows, key=lambda k: windows[k])
-    res = matcher.match(
-        selected,
-        targets,
-        bands,
-        df,
-        min_n=min_n,
-        relax=relax,
-        window_col=f"fwd_{longest}",
-        date_range=date_range,
-        max_factor=max_factor,
-        fixed_factor=fixed_factor,
-    )
+    align_lead: bool = False,
+    ref_window: str | None = None,
+    locked: dict[str, bool] | None = None,
+) -> tuple[pd.DataFrame, matcher.MatchResult, pd.DataFrame]:
+    """Casa o passado com os alvos e resume as janelas futuras.
+
+    Com align_lead, cada janela recebe seu proprio shift (e portanto sua propria
+    amostra), porque o lead centro a centro correto depende do horizonte. Os
+    graficos e a lista de episodios usam a janela de referencia.
+    """
     scope = df if date_range is None else df.loc[date_range[0] : date_range[1]]
-    table = stats.summarize(scope, res.mask, windows, gap_days=gap_days)
-    return table, res
+    tem_lead = any(i.meta.get("align_lead") and "delta_base" in i.meta for i in selected.values())
+
+    if not (align_lead and tem_lead):
+        longest = anchor_window or max(windows, key=lambda k: windows[k])
+        res = matcher.match(
+            selected, targets, bands, df, min_n=min_n, relax=relax,
+            window_col=f"fwd_{longest}", date_range=date_range,
+            max_factor=max_factor, fixed_factor=fixed_factor,
+        )
+        table = stats.summarize(scope, res.mask, windows, gap_days=gap_days)
+        detalhe = pd.DataFrame([
+            {"janela": h, "indicador": i.label, "shift (d)": i.meta.get("shift_aplicado", 0),
+             "alvo": round(targets[k], 3), "banda": round(res.bands_used[k], 3)}
+            for h in windows for k, i in selected.items()
+        ])
+        return table, res, detalhe
+
+    ref = ref_window if ref_window in windows else list(windows)[0]
+    locked = locked or {}
+    linhas, detalhes, res_ref = [], [], None
+    for h, dias in windows.items():
+        sel_h = {k: indicador_para_janela(i, dias) for k, i in selected.items()}
+        # alvo travado acompanha o valor de hoje, que muda junto com o shift
+        alvos_h = {
+            k: (float(sel_h[k].current) if locked.get(k, True) else targets[k])
+            for k in sel_h
+        }
+        res_h = matcher.match(
+            sel_h, alvos_h, bands, df, min_n=min_n, relax=relax,
+            window_col=f"fwd_{h}", date_range=date_range,
+            max_factor=max_factor, fixed_factor=fixed_factor,
+        )
+        linhas.append(stats.summarize(scope, res_h.mask, {h: dias}, gap_days=gap_days).iloc[0])
+        for k, i in sel_h.items():
+            shift = i.meta.get("shift_aplicado", 0)
+            detalhes.append({
+                "janela": h,
+                "indicador": i.label.split(" - ")[0],
+                "shift (d)": shift,
+                "lead alvo (d)": i.meta.get("lead_days"),
+                "lead efetivo (d)": (lead_efetivo(shift, i.meta["window_days"], dias)
+                                     if "window_days" in i.meta else None),
+                "alvo": round(alvos_h[k], 3),
+                "banda": round(res_h.bands_used[k], 3),
+            })
+        if h == ref:
+            res_ref = res_h
+
+    return pd.DataFrame(linhas).reset_index(drop=True), res_ref, pd.DataFrame(detalhes)
 
 
 def baseline(df: pd.DataFrame, windows: dict[str, int], date_range=None) -> pd.DataFrame:

@@ -40,18 +40,46 @@ class Indicator:
         s = self.series.dropna()
         return s.index[-1] if len(s) else None
 
-    def distance(self, target: float) -> pd.Series:
-        """Distancia de cada dia ate `target`, na unidade da banda."""
+    def distance(self, target: float, index: pd.DatetimeIndex | None = None) -> pd.Series:
+        """Distancia de cada dia ate `target`, na unidade da banda.
+
+        `index` delimita a amostra. Importa no modo 'pct': o percentil de hoje e
+        calculado dentro do periodo que esta sendo analisado, nao no historico
+        inteiro, senao "hoje esta no 4o quartil" mudaria de significado conforme
+        o filtro de datas.
+        """
+        s = self.series if index is None else self.series.reindex(index)
+
         if self.band_mode == "circular":
-            return cycle_mod.circular_distance(self.series, target, int(self.meta["cycle_days"]))
+            return cycle_mod.circular_distance(s, target, int(self.meta["cycle_days"]))
+
+        if self.band_mode == "pct":
+            # distancia em pontos percentuais de posicao na distribuicao:
+            # banda de 12,5 = a largura de meio quartil para cada lado
+            valido = s.dropna()
+            if valido.empty:
+                return pd.Series(np.nan, index=s.index)
+            rank = valido.rank(pct=True) * 100.0
+            rank_alvo = float((valido < target).mean() * 100.0)
+            return (rank - rank_alvo).abs().reindex(s.index)
+
         if self.band_mode == "rel":
             denom = abs(target) if abs(target) > 1e-9 else 1.0
-            return (self.series - target).abs() / denom * 100.0
-        return (self.series - target).abs()
+            return (s - target).abs() / denom * 100.0
 
-    def mask(self, target: float, band: float) -> pd.Series:
-        d = self.distance(target)
+        return (s - target).abs()
+
+    def mask(self, target: float, band: float, index: pd.DatetimeIndex | None = None) -> pd.Series:
+        d = self.distance(target, index=index)
         return (d <= band).fillna(False)
+
+    def percentil(self, valor: float, index: pd.DatetimeIndex | None = None) -> float:
+        """Posicao de `valor` na distribuicao do indicador, em pontos percentuais."""
+        s = self.series if index is None else self.series.reindex(index)
+        valido = s.dropna()
+        if valido.empty:
+            return float("nan")
+        return float((valido < valor).mean() * 100.0)
 
 
 # ----------------------------------------------------------------- construtores
