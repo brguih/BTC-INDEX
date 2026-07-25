@@ -6,6 +6,7 @@ deve custar uma rodada de rede.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -13,7 +14,7 @@ import pandas as pd
 from . import indicators as ind_mod
 from . import matcher, panel as panel_mod, stats
 from .cycle import DEFAULT_CYCLE_DAYS
-from .sources import btc_price, fear_greed, global_m2, net_liquidity
+from .sources import btc_price, fear_greed, fred, global_m2, net_liquidity
 
 
 @dataclass
@@ -37,12 +38,52 @@ class RawData:
     fetched_at: pd.Timestamp
 
 
+# series do FRED usadas direto pelo painel (a da China e buscada dentro do
+# proprio fetcher dela, entao fica de fora para dois threads nao escreverem o
+# mesmo arquivo de cache)
+FRED_SERIES = ("WM2NS", "DEXUSEU", "DEXCHUS", "DEXJPUS", "DEXUSUK", "WALCL", "WTREGEN", "RRPONTSYD")
+
+
+def prefetch(force: bool = False, max_workers: int = 14) -> dict[str, str]:
+    """Aquece o cache de todas as fontes em paralelo.
+
+    Sao 14 fontes independentes; em fila custam ~36s, em paralelo ~4s. Cada
+    tarefa escreve seu proprio arquivo de cache, entao nao ha disputa. O TTL de
+    cada fonte continua valendo: o que estiver fresco nao vai a rede.
+
+    Devolve as falhas por fonte; nao levanta excecao, porque cada consumidor
+    ainda tem seu proprio fallback para cache antigo.
+    """
+    tarefas = {
+        "btc_price": lambda: btc_price.fetch(force=force),
+        "fear_greed": lambda: fear_greed.fetch(force=force),
+        "ecb_m2": lambda: global_m2._ea_m2_eur_tn(force),
+        "china_m2": lambda: global_m2._cn_m2_cny_tn(force),
+        "japan_m2": lambda: global_m2._jp_m2_jpy_tn(force),
+        "uk_m4": lambda: global_m2._uk_m4_gbp_tn(force),
+    }
+    for sid in FRED_SERIES:
+        tarefas[f"fred_{sid}"] = lambda sid=sid: fred.series(sid, force=force)
+
+    falhas: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futuros = {nome: ex.submit(fn) for nome, fn in tarefas.items()}
+        for nome, fut in futuros.items():
+            try:
+                fut.result()
+            except Exception as exc:  # noqa: BLE001
+                falhas[nome] = str(exc)
+                print(f"[aviso] prefetch de {nome} falhou: {exc}")
+    return falhas
+
+
 def load_raw(force: bool = False) -> RawData:
+    prefetch(force=force)  # a partir daqui tudo vem do cache, sem rede
     return RawData(
-        btc=btc_price.close_series(force=force),
-        fng=fear_greed.series(force=force),
-        m2_components=global_m2.components_usd_tn(force=force),
-        netliq=net_liquidity.series(force=force),
+        btc=btc_price.close_series(),
+        fng=fear_greed.series(),
+        m2_components=global_m2.components_usd_tn(),
+        netliq=net_liquidity.series(),
         fetched_at=pd.Timestamp.now(),
     )
 

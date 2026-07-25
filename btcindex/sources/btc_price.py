@@ -9,15 +9,15 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from ..cache import cached, http_get
+from ..cache import cached, http_get, load
 
 BITSTAMP = "https://www.bitstamp.net/api/v2/ohlc/btcusd/"
 START_TS = 1325376000  # 2012-01-01
 STEP = 86400
 
 
-def _fetch_bitstamp() -> pd.DataFrame:
-    rows, start = [], START_TS
+def _fetch_bitstamp(since_ts: int | None = None) -> pd.DataFrame:
+    rows, start = [], since_ts or START_TS
     now = int(datetime.now(tz=timezone.utc).timestamp())
     while start < now:
         r = http_get(BITSTAMP, params={"step": STEP, "limit": 1000, "start": start})
@@ -58,10 +58,28 @@ def _fetch_yahoo() -> pd.DataFrame:
     return df.dropna(subset=["close"]).drop_duplicates("date").set_index("date").sort_index()
 
 
+def _fetch_incremental() -> pd.DataFrame:
+    """Busca so o que falta desde a ultima data em cache.
+
+    O historico completo custa 6 requisicoes paginadas; havendo cache, uma basta.
+    Refaz os ultimos 3 dias porque a barra do dia corrente ainda esta se formando.
+    """
+    old = load("btc_price")
+    if old is None or len(old) < 3000:
+        return _fetch_bitstamp()
+
+    last = pd.Timestamp(old.index.max())
+    since = int((last - pd.Timedelta(days=3)).timestamp())
+    new = _fetch_bitstamp(since_ts=since)
+    if new.empty:
+        return old
+    return pd.concat([old[~old.index.isin(new.index)], new]).sort_index()
+
+
 def fetch(force: bool = False) -> pd.DataFrame:
     def _go():
         try:
-            df = _fetch_bitstamp()
+            df = _fetch_incremental()
             if len(df) > 3000:
                 return df
             print("[aviso] Bitstamp devolveu poucas barras; tentando Yahoo")

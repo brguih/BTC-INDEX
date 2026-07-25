@@ -3,5 +3,9 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
-data/cache/*.csv
 .streamlit/secrets.toml
+
+# data/cache/*.csv e versionado de proposito: no Streamlit Cloud o container
+# sobe vazio e hiberna sem trafego, entao sem os CSVs no repo todo cold start
+# refaz 14 requisicoes de rede. Com eles, o app abre em ~0,2s.
+# A Action .github/workflows/atualizar-dados.yml mantem esses arquivos frescos.

@@ -19,6 +19,25 @@ python update_data.py
 
 Os dados ficam em `data/cache/*.csv`. A interface tem um botão **Atualizar dados agora**.
 
+## Deploy no Streamlit Cloud
+
+O container do Cloud sobe vazio e **hiberna sem tráfego**, então cold start é a regra, não a
+exceção — e sem cuidado cada visita paga a busca inteira nas fontes. Três coisas evitam isso:
+
+- **As 14 fontes são buscadas em paralelo** (`engine.prefetch`). Medido: 36,3s em fila → 4,6s.
+- **`data/cache/*.csv` é versionado de propósito** (1,4 MB). Com os CSVs no repo o cold start
+  lê disco em vez de rede: **0,18s**. O TTL de cada fonte continua valendo, então o que
+  vencer é rebuscado — em paralelo, no primeiro acesso.
+- **`.github/workflows/atualizar-dados.yml`** roda todo dia às 11:00 UTC, atualiza os CSVs e
+  commita. O push dispara o redeploy do Streamlit Cloud, que é como o dado novo chega ao app.
+  Dá para rodar na mão pela aba Actions (*workflow_dispatch*).
+
+A Action precisa de permissão de escrita: **Settings → Actions → General → Workflow
+permissions → Read and write permissions**.
+
+O preço do BTC é buscado de forma incremental: havendo cache, só o trecho que falta desde a
+última data (1 requisição em vez das 6 páginas do histórico completo).
+
 ## Indicadores
 
 | Indicador | O que é | Histórico | Parâmetros |

@@ -1,0 +1,49 @@
+name: Atualizar dados
+
+# Mantem data/cache/*.csv fresco no repositorio. Sem isso o app no Streamlit
+# Cloud gasta ~36s de rede a cada cold start (e o Cloud hiberna sem trafego,
+# entao cold start e a regra, nao a excecao).
+# O push desta Action tambem dispara o redeploy do Streamlit Cloud, que e como
+# o dado novo chega ate o app.
+
+on:
+  schedule:
+    - cron: "0 11 * * *"  # 11:00 UTC = 08:00 em Brasilia
+  workflow_dispatch:       # permite rodar na mao pela aba Actions
+
+permissions:
+  contents: write
+
+concurrency:
+  group: atualizar-dados
+  cancel-in-progress: false
+
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # update_data.py nao usa streamlit nem plotly; instalar so o necessario
+      # deixa a Action em segundos em vez de minutos
+      - name: Instalar dependencias
+        run: pip install "pandas>=2.0" "numpy>=1.24" "requests>=2.28"
+
+      - name: Buscar dados nas fontes
+        run: python update_data.py
+
+      - name: Commitar se algo mudou
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/cache
+          if git diff --staged --quiet; then
+            echo "Nenhuma fonte publicou dado novo; nada a commitar."
+          else
+            git commit -m "dados: atualizacao automatica $(date -u +%Y-%m-%d)"
+            git push
+          fi
