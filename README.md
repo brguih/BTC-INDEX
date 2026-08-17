@@ -24,7 +24,7 @@ Os dados ficam em `data/cache/*.csv`. A interface tem um botão **Atualizar dado
 O container do Cloud sobe vazio e **hiberna sem tráfego**, então cold start é a regra, não a
 exceção — e sem cuidado cada visita paga a busca inteira nas fontes. Três coisas evitam isso:
 
-- **As 14 fontes são buscadas em paralelo** (`engine.prefetch`). Medido: 36,3s em fila → 4,6s.
+- **As 12 fontes são buscadas em paralelo** (`engine.prefetch`). Medido: 36,3s em fila → 4,6s.
 - **`data/cache/*.csv` é versionado de propósito** (1,4 MB). Com os CSVs no repo o cold start
   lê disco em vez de rede: **0,18s**. O TTL de cada fonte continua valendo, então o que
   vencer é rebuscado — em paralelo, no primeiro acesso.
@@ -40,42 +40,42 @@ O preço do BTC é buscado de forma incremental: havendo cache, só o trecho que
 
 ## Indicadores
 
-| Indicador | O que é | Histórico | Parâmetros |
+| Indicador | O que é | Histórico | Banda |
 |---|---|---|---|
-| **Fear & Greed** | índice de sentimento 0–100 da alternative.me | 2018-02 → hoje | banda ± pontos ou ± percentil |
-| **M2 global (USD)** | M2 de EUA + Zona do Euro + China + Japão + Reino Unido convertido a dólar | 1999 → hoje | janela de variação (semanas), *lead centro a centro*, países no agregado, banda |
-| **Juro real 10a** | juro real de 10 anos dos EUA (TIPS), sinal invertido: positivo = afrouxamento | 2003 → hoje | idem |
-| **Net Liquidity do Fed** | balanço do Fed − conta do Tesouro − reverse repo | 2003 → hoje | idem |
-| **Ciclo do BTC** | dias decorridos desde a âncora do ciclo | 2012-11 → hoje | âncora (halving/topo/fundo), comprimento do ciclo, banda ± dias |
+| **Fear & Greed** | índice de sentimento 0–100 da alternative.me | 2018-02 → hoje | ± pontos ou ± percentil |
+| **MVRV Z-score** | lucro não realizado do mercado inteiro, normalizado | 2011 → hoje | ± z ou ± percentil |
+| **Ciclo do BTC** | dias decorridos desde a âncora do ciclo | 2012-11 → hoje | ± dias (distância circular) |
 
-### O lead é medido de centro a centro
+O **M2 global** não é um indicador: ele não entra em nenhuma análise. Tem aba própria, onde é
+desenhado sobre o preço com o deslocamento em dias que você escolher.
 
-A janela de variação já olha para trás: um delta de 8 semanas terminando em `τ` tem centro de
-massa em `τ−28d`. O retorno futuro de horizonte `H` tem centro em `t+H/2`. Logo:
+### O benchmark "holder"
 
-    lead efetivo = shift + janela/2 + horizonte/2
+Toda tabela de resultado traz, ao lado dos números do indicador, a estatística de **comprar num
+dia qualquer do período e segurar** — mesma janela, mesmo recorte de datas. A coluna
+**Vantagem p.p.** é a diferença entre as duas medianas.
 
-Um shift fixo de 70 dias em todas as janelas testava, na prática, **20 semanas** de lead na
-janela de 12 meses. Por isso o parâmetro é o **lead centro a centro** e o shift de cada janela
-é derivado dele. O default de **91 dias** foi medido, não herdado: o pico da correlação cruzada
-está em +91d, com correlação contemporânea de apenas +0,04 — as 13 semanas do CrossBorder, não
-as 10 populares.
+É a pergunta que importa: o indicador ajuda, ou é só o bitcoin tendo subido? Uma mediana de
++34% em 12 meses parece ótima até você ver que o holder fez +79% no mesmo período — vantagem
+de −45 p.p.
 
-Horizontes longos não têm como ficar alinhados (6 meses já consome 91 dias só na sua metade):
-o shift satura em zero, o lead efetivo estoura, e a interface avisa.
+### MVRV Z-score
 
-### Bandas por percentil
+    Z = (valor de mercado − valor realizado) / desvio-padrão expansivo do valor de mercado
 
-Sinais fracos e monotônicos não aparecem numa banda estreita em torno de um valor. O que informa
-é **em que parte da distribuição** hoje está: ±12,5 pontos percentuais é a largura de um quartil,
-±10 um quintil, ±5 um decil. A distribuição de referência é a do período filtrado.
+O valor realizado precifica cada moeda pela última vez que ela se moveu, então a diferença mede
+o lucro não realizado do mercado. O Z-score normaliza pela escala do próprio ciclo, o que
+permite comparar 2013 com 2025.
 
-### Aviso sobre o M2 global
+Dois detalhes de implementação:
 
-Cerca de dois terços da variância do sinal vêm do **câmbio**, não de criação de moeda: congelando
-o câmbio, a volatilidade da variação de 8 semanas cai de 1,71 pp para 0,63 pp, e a correlação com
-o BTC cai de +0,08 para **+0,03**. Na prática ele funciona como um sinal de dólar. E o famoso
-"88–91% de correlação" é correlação de **níveis** de duas séries que sobem; em variação dá +0,08.
+- O desvio-padrão é **expansivo** (só o passado até cada data). Usar o da série inteira
+  embutiria informação do futuro em toda a série histórica e inflaria o backtest.
+- A Coin Metrics não libera `CapRealUSD` no tier gratuito, então o valor realizado é derivado:
+  `valor de mercado ÷ MVRV`. O resultado bate com referências externas dentro de ~0,03 z.
+
+Cuidado ao combinar com o ciclo: **MVRV é parcialmente colinear com o dia do ciclo**, então os
+dois juntos na composta cortam menos amostra do que parece. O funil mostra isso.
 
 ### Sobre o fator das bandas
 
@@ -106,7 +106,7 @@ app.py                  interface Streamlit
 update_data.py          atualização por linha de comando
 btcindex/
   cache.py              HTTP com retry + cache CSV + reamostragem para diário
-  sources/              uma fonte por arquivo (btc_price, fear_greed, fred, global_m2, net_liquidity)
+  sources/              uma fonte por arquivo (btc_price, fear_greed, fred, global_m2, mvrv)
   cycle.py              halvings, topos, fundos, distância circular
   indicators.py         definição dos indicadores e regra de comparação
   matcher.py            casamento por banda, "E" composto, relaxamento automático
@@ -148,8 +148,7 @@ Nada em `matcher.py`, `stats.py` ou na aba de resultados precisa mudar.
 | M2 Japão | IMF IFS `M.JP.FMB_XDC` via DBnomics | não |
 | M4 Reino Unido | Bank of England `LPMAUYM` | não |
 | Câmbio | FRED `DEXUSEU`, `DEXCHUS`, `DEXJPUS`, `DEXUSUK` | não |
-| Net Liquidity | FRED `WALCL`, `WTREGEN`, `RRPONTSYD` | não |
-| Juro real 10a | FRED `DFII10` | não |
+| MVRV Z-score | Coin Metrics community API (`CapMVRVCur`, `CapMrktCurUSD`) | não |
 
 As séries de M2 estrangeiro **do FRED** (`MYAGM2EZM196N`, `MYAGM2JPM189N`, `MABMM301*`) foram
 descontinuadas entre 2017 e 2023 e não servem para atualização diária — por isso cada país vem

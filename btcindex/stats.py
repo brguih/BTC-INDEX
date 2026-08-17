@@ -52,8 +52,16 @@ def summarize(
                 "min_%": _pct(vals.min()),
                 "max_%": _pct(vals.max()),
                 "acerto_%": _pct((vals > 0).mean(), scale=100) if len(vals) else np.nan,
-                "baseline_mediana_%": _pct(base.median()),
-                "baseline_n": int(len(base)),
+                # "holder" = comprar e segurar em qualquer dia do periodo analisado.
+                # E a pergunta que importa: o indicador ajuda, ou e so o bitcoin subindo?
+                "holder_mediana_%": _pct(base.median()),
+                "holder_media_%": _pct(base.mean()),
+                "holder_acerto_%": _pct((base > 0).mean(), scale=100) if len(base) else np.nan,
+                "holder_n": int(len(base)),
+                "vantagem_pp": (
+                    round(_pct(vals.median()) - _pct(base.median()), 2)
+                    if len(vals) and len(base) else np.nan
+                ),
             }
         )
     out = pd.DataFrame(rows)

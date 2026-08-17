@@ -9,48 +9,79 @@ pytest.importorskip("streamlit.testing.v1")
 
 @pytest.fixture(scope="module")
 def app():
-    return AppTest.from_file("app.py", default_timeout=300).run()
+    return AppTest.from_file("app.py", default_timeout=400).run()
 
 
 def _card(at, prefixo: str):
     return next(m for m in at.metric if m.label.startswith(prefixo))
 
 
-def _alvo_m2(at) -> float:
-    """Alvo efetivamente usado: o valor travado aparece na legenda 'alvo = X'."""
-    legendas = [c.value for c in at.sidebar.caption if c.value.startswith("alvo = ")]
-    return float(legendas[1].split("=")[1].split("(")[0])
-
-
-def test_muda_semanas_muda_valor_de_hoje_e_o_alvo(app):
-    """Regressao: o alvo ficava congelado no session_state quando a janela mudava,
-    e a analise passava a procurar o valor errado sem nenhum aviso."""
-    antes_card = _card(app, "M2 global").value
-    antes_alvo = _alvo_m2(app)
-    assert antes_alvo == pytest.approx(float(antes_card.rstrip("%")), abs=0.01)
-
-    app.sidebar.number_input(key="m2w").set_value(10).run()
-
-    depois_card = _card(app, "M2 global").value
-    depois_alvo = _alvo_m2(app)
-    assert depois_card != antes_card, "o card do topo deveria refletir a nova janela"
-    assert depois_alvo != antes_alvo, "o alvo deveria acompanhar o valor de hoje"
-    assert depois_alvo == pytest.approx(float(depois_card.rstrip("%")), abs=0.01)
-
-
-def test_muda_lead_tambem_propaga(app):
-    app.sidebar.number_input(key="m2l").set_value(0).run()
-    assert _alvo_m2(app) == pytest.approx(float(_card(app, "M2 global").value.rstrip("%")), abs=0.01)
-    app.sidebar.number_input(key="m2l").set_value(70).run()
-
-
-def test_destravar_libera_campo_manual(app):
-    app.sidebar.checkbox(key="lock_m2_delta").set_value(False).run()
-    manual = [w for w in app.sidebar.number_input if (w.key or "").startswith("t_m2_delta_")]
-    assert len(manual) == 1
-    assert manual[0].value == pytest.approx(float(_card(app, "M2 global").value.rstrip("%")), abs=0.01)
-    app.sidebar.checkbox(key="lock_m2_delta").set_value(True).run()
+def _alvos(at) -> list[float]:
+    """Alvos travados, lidos das legendas 'alvo = X' da barra lateral."""
+    return [float(c.value.split("=")[1].split("(")[0])
+            for c in at.sidebar.caption if c.value.startswith("alvo = ")]
 
 
 def test_app_roda_sem_excecao(app):
     assert not app.exception
+
+
+def test_abas_esperadas(app):
+    assert [t.label for t in app.tabs][:5] == [
+        "Individual", "Composto (E)", "M2 global", "Dados e fontes", "Metodologia"
+    ]
+
+
+def test_cartoes_do_topo(app):
+    rotulos = [m.label for m in app.metric]
+    assert "MVRV Z-score" in rotulos
+    for sumido in ("Net Liquidity", "Juro real"):
+        assert not any(r.startswith(sumido) for r in rotulos), f"{sumido} deveria ter sido removido"
+
+
+def test_m2_ficou_fora_da_analise(app):
+    """O M2 so pode aparecer como grafico: sem trava, sem alvo, sem banda."""
+    chaves = {w.key for w in app.sidebar.checkbox if w.key} | {w.key for w in app.sidebar.number_input if w.key}
+    assert "lock_m2_delta" not in chaves
+    assert "use_m2" not in chaves
+    assert "b_m2" not in chaves
+    assert "m2l" in chaves, "o deslocamento do M2 para o grafico deve continuar existindo"
+
+
+def test_holder_aparece_nas_tabelas(app):
+    """Toda tabela de resultado precisa da referencia holder e da vantagem."""
+    com_vantagem = [d for d in app.dataframe if "Vantagem p.p." in d.value.columns]
+    assert com_vantagem, "nenhuma tabela traz a comparacao com o holder"
+    t = com_vantagem[0].value
+    assert "Holder mediana %" in t.columns
+    esperado = (t["Mediana %"] - t["Holder mediana %"]).round(2)
+    assert (t["Vantagem p.p."] - esperado).abs().max() < 0.02
+
+
+def test_sem_histograma(app):
+    """O histograma foi retirado; sobra o grafico de preco e o do indicador."""
+    chaves = {w.key for w in app.selectbox if w.key}
+    assert not any(k.startswith("h_") for k in chaves)
+
+
+def test_mudar_ancora_do_ciclo_atualiza_o_alvo(app):
+    """Regressao: alvo travado tem que acompanhar o valor de hoje quando o parametro muda."""
+    antes_card = _card(app, "Dia do ciclo").value
+    antes_alvos = _alvos(app)
+
+    app.sidebar.selectbox(key="cya").set_value("topo").run()
+
+    depois_card = _card(app, "Dia do ciclo").value
+    assert depois_card != antes_card, "o card deveria refletir a nova ancora"
+    assert _alvos(app) != antes_alvos, "o alvo travado deveria acompanhar"
+    assert float(depois_card) == pytest.approx(_alvos(app)[-1], abs=0.01)
+
+    app.sidebar.selectbox(key="cya").set_value("halving").run()
+
+
+def test_destravar_libera_campo_manual(app):
+    app.sidebar.checkbox(key="lock_mvrv_z").set_value(False).run()
+    manual = [w for w in app.sidebar.number_input if (w.key or "").startswith("t_mvrv_z_")]
+    assert len(manual) == 1
+    assert manual[0].value == pytest.approx(float(_card(app, "MVRV Z-score").value), abs=0.01)
+    app.sidebar.checkbox(key="lock_mvrv_z").set_value(True).run()

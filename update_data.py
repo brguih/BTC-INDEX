@@ -19,7 +19,7 @@ def main() -> int:
     rows = [
         ("BTC/USD (Bitstamp)", raw.btc),
         ("Fear & Greed (alternative.me)", raw.fng),
-        ("Net Liquidity (FRED)", raw.netliq),
+        ("MVRV Z-score (Coin Metrics)", raw.mvrv_z),
     ]
     print(f"{'serie':38s} {'inicio':>12s} {'fim':>12s} {'obs':>7s}  ultimo")
     for name, s in rows:

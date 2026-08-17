@@ -14,7 +14,7 @@ import pandas as pd
 from . import indicators as ind_mod
 from . import matcher, panel as panel_mod, stats
 from .cycle import DEFAULT_CYCLE_DAYS
-from .sources import btc_price, fear_greed, fred, global_m2, net_liquidity
+from .sources import btc_price, fear_greed, fred, global_m2, mvrv
 
 
 # Lead verdadeiro medido: o pico da correlacao cruzada entre a variacao de 8
@@ -27,13 +27,8 @@ LEAD_PADRAO = 91
 @dataclass
 class Params:
     windows: dict[str, int] = field(default_factory=lambda: dict(panel_mod.WINDOWS))
-    m2_weeks: int = 8
-    m2_lead: int = LEAD_PADRAO
+    m2_lead: int = LEAD_PADRAO  # deslocamento em dias, so para o grafico
     m2_components: tuple[str, ...] = global_m2.DEFAULT_COMPONENTS
-    netliq_weeks: int = 8
-    netliq_lead: int = LEAD_PADRAO
-    real_weeks: int = 8
-    real_lead: int = LEAD_PADRAO
     cycle_anchor: str = "halving"
     cycle_days: int = DEFAULT_CYCLE_DAYS
     align_lead: bool = True
@@ -67,19 +62,17 @@ class RawData:
     btc: pd.Series
     fng: pd.Series
     m2_components: pd.DataFrame
-    netliq: pd.Series
-    real_yield: pd.Series
+    mvrv_z: pd.Series
     fetched_at: pd.Timestamp
 
 
 # series do FRED usadas direto pelo painel (a da China e buscada dentro do
 # proprio fetcher dela, entao fica de fora para dois threads nao escreverem o
 # mesmo arquivo de cache)
-FRED_SERIES = ("WM2NS", "DEXUSEU", "DEXCHUS", "DEXJPUS", "DEXUSUK", "WALCL", "WTREGEN",
-               "RRPONTSYD", "DFII10")
+FRED_SERIES = ("WM2NS", "DEXUSEU", "DEXCHUS", "DEXJPUS", "DEXUSUK")
 
 
-def prefetch(force: bool = False, max_workers: int = 14) -> dict[str, str]:
+def prefetch(force: bool = False, max_workers: int = 12) -> dict[str, str]:
     """Aquece o cache de todas as fontes em paralelo.
 
     Sao 14 fontes independentes; em fila custam ~36s, em paralelo ~4s. Cada
@@ -96,6 +89,7 @@ def prefetch(force: bool = False, max_workers: int = 14) -> dict[str, str]:
         "china_m2": lambda: global_m2._cn_m2_cny_tn(force),
         "japan_m2": lambda: global_m2._jp_m2_jpy_tn(force),
         "uk_m4": lambda: global_m2._uk_m4_gbp_tn(force),
+        "mvrv": lambda: mvrv.fetch(force=force),
     }
     for sid in FRED_SERIES:
         tarefas[f"fred_{sid}"] = lambda sid=sid: fred.series(sid, force=force)
@@ -118,8 +112,7 @@ def load_raw(force: bool = False) -> RawData:
         btc=btc_price.close_series(),
         fng=fear_greed.series(),
         m2_components=global_m2.components_usd_tn(),
-        netliq=net_liquidity.series(),
-        real_yield=fred.series("DFII10"),
+        mvrv_z=mvrv.zscore(),
         fetched_at=pd.Timestamp.now(),
     )
 
@@ -147,62 +140,23 @@ def build_indicators(raw: RawData, p: Params, index: pd.DatetimeIndex) -> dict[s
     )
     inds["fng"] = ind_mod.align(fng, index)
 
-    comps = [c for c in p.m2_components if c in raw.m2_components.columns]
-    m2_level = global_m2.chain_link(raw.m2_components[comps])
-    inds["m2_delta"] = _indicador_de_variacao(
-        key="m2_delta",
-        nome="M2 global",
-        base=m2_level.pct_change(p.m2_weeks * 7) * 100,
-        weeks=p.m2_weeks,
-        lead=p.m2_lead,
-        unidade=f"% em {p.m2_weeks} semanas",
-        banda_padrao=0.25,
-        rotulo_banda="+/- pontos percentuais",
-        note="M2 de " + "+".join(comps) + " em USD, agregado encadeado. ATENCAO: cerca de dois tercos "
-        "da variancia deste sinal vem do cambio, nao de criacao de moeda - com o cambio congelado a "
-        "correlacao com o BTC cai de +0,08 para +0,03. Na pratica ele funciona como um sinal de dolar.",
-        last_real=raw.m2_components[comps].dropna(how="all").index.max(),
-        p=p,
-        index=index,
-        extra={"level": m2_level, "components": tuple(comps)},
+    mvrv_ind = ind_mod.Indicator(
+        key="mvrv_z",
+        label="MVRV Z-score",
+        series=raw.mvrv_z,
+        unit="desvios-padrao",
+        band_mode="abs",
+        default_band=0.15,
+        band_label="+/- z",
+        note="(valor de mercado - valor realizado) / desvio-padrao expansivo do valor de mercado, "
+        "com dados da Coin Metrics desde 2011. O valor realizado precifica cada moeda pela ultima "
+        "vez que ela se moveu, entao o indicador mede lucro nao realizado do mercado inteiro. "
+        "O desvio-padrao usa so o passado ate cada data - usar o da serie inteira embutiria "
+        "informacao do futuro e inflaria o backtest. Cuidado: e parcialmente colinear com o dia "
+        "do ciclo, entao os dois juntos na composta cortam menos do que parece.",
+        last_real_date=raw.mvrv_z.dropna().index.max(),
     )
-
-    inds["netliq_delta"] = _indicador_de_variacao(
-        key="netliq_delta",
-        nome="Net Liquidity Fed",
-        base=raw.netliq.pct_change(p.netliq_weeks * 7) * 100,
-        weeks=p.netliq_weeks,
-        lead=p.netliq_lead,
-        unidade=f"% em {p.netliq_weeks} semanas",
-        banda_padrao=1.0,
-        rotulo_banda="+/- pontos percentuais",
-        note="Balanco do Fed - TGA - Reverse Repo (FRED). So EUA. Sinal fraco e instavel: spearman de "
-        "+0,27 ate 2020 e +0,09 de 2021 em diante, porque a composicao mudou (o RRP foi de zero a "
-        "US$ 2,5 tri e voltou a zero). Use com desconfianca.",
-        last_real=raw.netliq.dropna().index.max(),
-        p=p,
-        index=index,
-        extra={"level": raw.netliq},
-    )
-
-    inds["real_yield"] = _indicador_de_variacao(
-        key="real_yield",
-        nome="Juro real 10a (queda)",
-        base=-raw.real_yield.diff(p.real_weeks * 7),
-        weeks=p.real_weeks,
-        lead=p.real_lead,
-        unidade=f"pp de queda em {p.real_weeks} semanas",
-        banda_padrao=0.10,
-        rotulo_banda="+/- pontos percentuais",
-        note="Juro real de 10 anos dos EUA (TIPS, FRED DFII10, diario desde 2003), com o sinal "
-        "invertido: positivo = juro caindo = afrouxamento. Antecedente confirmado - o pico da "
-        "correlacao cruzada esta em +91 dias e o contemporaneo e so +0,11, e ele sobrevive ao "
-        "controle pelo momento do proprio BTC. E o mais ortogonal ao sentimento (0,09) e ao ciclo (0,01).",
-        last_real=raw.real_yield.dropna().index.max(),
-        p=p,
-        index=index,
-        extra={"level": raw.real_yield},
-    )
+    inds["mvrv_z"] = ind_mod.align(mvrv_ind, index)
 
     inds["cycle"] = ind_mod.build_cycle(index, anchor=p.cycle_anchor, cycle_days=p.cycle_days)
     return inds
@@ -362,6 +316,26 @@ def analyse(
     return pd.DataFrame(linhas).reset_index(drop=True), res_ref, pd.DataFrame(detalhes)
 
 
-def baseline(df: pd.DataFrame, windows: dict[str, int], date_range=None) -> pd.DataFrame:
+def holder(df: pd.DataFrame, windows: dict[str, int], date_range=None) -> pd.DataFrame:
+    """Benchmark: comprar em qualquer dia do periodo e segurar.
+
+    E a referencia contra a qual todo indicador tem que se justificar - sem ela,
+    um "mediana de +34% em 12 meses" parece otimo ate voce descobrir que o
+    bitcoin fez +80% em 12 meses partindo de um dia qualquer.
+    """
     scope = df if date_range is None else df.loc[date_range[0] : date_range[1]]
     return stats.summarize(scope, pd.Series(True, index=scope.index), windows, gap_days=10**6)
+
+
+def m2_para_grafico(raw: RawData, componentes=None, lead_dias: int = 0) -> pd.Series:
+    """Nivel do M2 global em US$ trilhoes, deslocado `lead_dias` para a frente.
+
+    Deslocar para a frente e o que materializa a tese: o M2 de hoje aparece no
+    grafico na data em que se espera que o bitcoin reaja a ele.
+    """
+    comps = [c for c in (componentes or raw.m2_components.columns) if c in raw.m2_components.columns]
+    nivel = global_m2.chain_link(raw.m2_components[comps])
+    if lead_dias:
+        nivel = nivel.copy()
+        nivel.index = nivel.index + pd.Timedelta(days=int(lead_dias))
+    return nivel.rename("m2_global_usd_tn")

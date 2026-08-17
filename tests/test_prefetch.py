@@ -11,7 +11,7 @@ from btcindex.sources import btc_price
 
 
 def test_prefetch_roda_tudo_em_paralelo(monkeypatch):
-    """14 fontes de 0,3s em fila levariam 4,2s; em paralelo, menos de 1s."""
+    """12 fontes de 0,3s em fila levariam 3,6s; em paralelo, menos de 1s."""
     chamadas = []
 
     def lenta(nome):
@@ -27,6 +27,7 @@ def test_prefetch_roda_tudo_em_paralelo(monkeypatch):
     monkeypatch.setattr(engine.global_m2, "_cn_m2_cny_tn", lenta("cn"))
     monkeypatch.setattr(engine.global_m2, "_jp_m2_jpy_tn", lenta("jp"))
     monkeypatch.setattr(engine.global_m2, "_uk_m4_gbp_tn", lenta("uk"))
+    monkeypatch.setattr(engine.mvrv, "fetch", lenta("mvrv"))
     monkeypatch.setattr(engine.fred, "series", lenta("fred"))
 
     inicio = time.perf_counter()
@@ -34,12 +35,12 @@ def test_prefetch_roda_tudo_em_paralelo(monkeypatch):
     duracao = time.perf_counter() - inicio
 
     assert falhas == {}
-    assert len(chamadas) == 6 + len(engine.FRED_SERIES)
+    assert len(chamadas) == 7 + len(engine.FRED_SERIES)
     assert duracao < 1.0, f"prefetch demorou {duracao:.2f}s: parece estar em fila"
 
 
 def test_prefetch_isola_falha_de_uma_fonte(monkeypatch):
-    """Uma fonte fora do ar nao pode derrubar as outras treze."""
+    """Uma fonte fora do ar nao pode derrubar as outras onze."""
     def quebrada(*a, **kw):
         raise RuntimeError("fonte fora do ar")
 
@@ -49,6 +50,7 @@ def test_prefetch_isola_falha_de_uma_fonte(monkeypatch):
     monkeypatch.setattr(engine.global_m2, "_ea_m2_eur_tn", lambda *a: pd.Series([1.0]))
     monkeypatch.setattr(engine.global_m2, "_cn_m2_cny_tn", lambda *a: pd.Series([1.0]))
     monkeypatch.setattr(engine.global_m2, "_uk_m4_gbp_tn", lambda *a: pd.Series([1.0]))
+    monkeypatch.setattr(engine.mvrv, "fetch", lambda **kw: pd.Series([1.0]))
     monkeypatch.setattr(engine.fred, "series", lambda *a, **kw: pd.Series([1.0]))
 
     falhas = engine.prefetch()

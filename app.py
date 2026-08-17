@@ -110,55 +110,16 @@ def controle_banda(key: str, padrao_abs: float, rotulo_abs: str, minimo: float, 
 
 
 def indicator_controls(raw: engine.RawData):
-    st.sidebar.header("Lead da liquidez")
-    p = engine.Params()
-    p.align_lead = st.sidebar.checkbox(
-        "Alinhar o lead a cada janela (centro a centro)", value=True, key="align",
-        help="A janela de variacao ja olha para tras. O lead real e "
-             "shift + janela/2 + horizonte/2, entao o shift precisa encolher conforme o horizonte "
-             "cresce. Desligado, aplica o mesmo shift bruto em todas as janelas (comportamento antigo).",
-    )
-    p.ref_window = st.sidebar.selectbox(
-        "Janela de referencia (graficos e episodios)", list(p.windows), index=1, key="refw",
-        help="Com o lead alinhado cada janela tem sua propria amostra; os graficos mostram esta.",
-    )
-
     st.sidebar.header("Indicadores")
+    p = engine.Params()
+
     with st.sidebar.expander("Fear & Greed", expanded=True):
         use_fng = st.checkbox("Usar", value=True, key="use_fng")
         modo_fng, band_fng = controle_banda("fng", 2.0, "Banda +/- pontos", 0.5, 50.0, 0.5)
 
-    with st.sidebar.expander("M2 global", expanded=True):
-        use_m2 = st.checkbox("Usar", value=True, key="use_m2")
-        p.m2_weeks = st.number_input("Janela de variacao (semanas)", 1, 104, 8, 1, key="m2w")
-        p.m2_lead = st.number_input(
-            "Lead centro a centro (dias)", 0, 365, engine.LEAD_PADRAO, 7, key="m2l",
-            help="Medido: o pico da correlacao cruzada com o BTC esta em 91 dias (13 semanas).",
-        )
-        comps = st.multiselect(
-            "Paises no agregado",
-            list(global_m2.DEFAULT_COMPONENTS),
-            default=list(global_m2.DEFAULT_COMPONENTS),
-            format_func=lambda c: global_m2.COMPONENT_LABELS[c],
-            key="m2c",
-        )
-        p.m2_components = tuple(comps) if comps else global_m2.DEFAULT_COMPONENTS
-        modo_m2, band_m2 = controle_banda("m2", 0.25, "Banda +/- p.p.", 0.01, 10.0, 0.05)
-
-    with st.sidebar.expander("Juro real 10a", expanded=True):
-        use_ry = st.checkbox("Usar", value=True, key="use_ry")
-        p.real_weeks = st.number_input("Janela de variacao (semanas)", 1, 104, 8, 1, key="ryw")
-        p.real_lead = st.number_input("Lead centro a centro (dias)", 0, 365, engine.LEAD_PADRAO, 7,
-                                      key="ryl")
-        modo_ry, band_ry = controle_banda("ry", 0.10, "Banda +/- p.p.", 0.01, 5.0, 0.01)
-
-    with st.sidebar.expander("Net Liquidity do Fed", expanded=False):
-        st.caption("Sinal fraco e instavel entre regimes; desligado por padrao.")
-        use_nl = st.checkbox("Usar", value=False, key="use_nl")
-        p.netliq_weeks = st.number_input("Janela de variacao (semanas)", 1, 104, 8, 1, key="nlw")
-        p.netliq_lead = st.number_input("Lead centro a centro (dias)", 0, 365, engine.LEAD_PADRAO,
-                                        7, key="nll")
-        modo_nl, band_nl = controle_banda("nl", 1.0, "Banda +/- p.p.", 0.05, 20.0, 0.05)
+    with st.sidebar.expander("MVRV Z-score", expanded=True):
+        use_mv = st.checkbox("Usar", value=True, key="use_mv")
+        modo_mv, band_mv = controle_banda("mv", 0.15, "Banda +/- z", 0.01, 5.0, 0.05)
 
     with st.sidebar.expander("Ciclo do BTC", expanded=True):
         use_cy = st.checkbox("Usar", value=True, key="use_cy")
@@ -167,12 +128,24 @@ def indicator_controls(raw: engine.RawData):
                                        cycle_mod.DEFAULT_CYCLE_DAYS, 5, key="cyd")
         band_cy = st.number_input("Banda +/- dias", 1.0, 200.0, 20.0, 1.0, key="b_cy")
 
-    use = {"fng": use_fng, "m2_delta": use_m2, "real_yield": use_ry,
-           "netliq_delta": use_nl, "cycle": use_cy}
-    bands = {"fng": band_fng, "m2_delta": band_m2, "real_yield": band_ry,
-             "netliq_delta": band_nl, "cycle": band_cy}
-    modos = {"fng": modo_fng, "m2_delta": modo_m2, "real_yield": modo_ry,
-             "netliq_delta": modo_nl, "cycle": "circular"}
+    st.sidebar.header("M2 global (so grafico)")
+    st.sidebar.caption("O M2 nao entra em nenhuma analise: ele so e desenhado sobre o preco.")
+    p.m2_lead = st.sidebar.number_input(
+        "Deslocamento do M2 (dias)", 0, 400, engine.LEAD_PADRAO, 7, key="m2l",
+        help="Quantos dias o M2 e empurrado para a frente no grafico.",
+    )
+    comps = st.sidebar.multiselect(
+        "Paises no agregado",
+        list(global_m2.DEFAULT_COMPONENTS),
+        default=list(global_m2.DEFAULT_COMPONENTS),
+        format_func=lambda c: global_m2.COMPONENT_LABELS[c],
+        key="m2c",
+    )
+    p.m2_components = tuple(comps) if comps else global_m2.DEFAULT_COMPONENTS
+
+    use = {"fng": use_fng, "mvrv_z": use_mv, "cycle": use_cy}
+    bands = {"fng": band_fng, "mvrv_z": band_mv, "cycle": band_cy}
+    modos = {"fng": modo_fng, "mvrv_z": modo_mv, "cycle": "circular"}
     return p, use, bands, modos
 
 
@@ -191,22 +164,22 @@ def price_chart(df: pd.DataFrame, dates: pd.DatetimeIndex, title: str) -> go.Fig
     return fig
 
 
-def distribution_chart(panel: pd.DataFrame, dates: pd.DatetimeIndex, window: str) -> go.Figure:
-    col = f"fwd_{window}"
-    matched = panel.loc[panel.index.isin(dates), col].dropna() * 100
-    base = panel[col].dropna() * 100
+def m2_chart(btc: pd.Series, m2: pd.Series, lead: int, start: pd.Timestamp) -> go.Figure:
+    """M2 global deslocado sobre o preco do BTC, eixo duplo, preco em log."""
+    b = btc.loc[start:]
+    m = m2.loc[start:]
     fig = go.Figure()
-    fig.add_trace(go.Histogram(x=base, name="todos os dias", opacity=0.45, histnorm="probability",
-                               marker_color=COLORS["base"], nbinsx=60))
-    fig.add_trace(go.Histogram(x=matched, name="dias casados", opacity=0.75, histnorm="probability",
-                               marker_color=COLORS["match"], nbinsx=60))
-    fig.add_vline(x=0, line_dash="dot", line_color="#555")
-    if len(matched):
-        fig.add_vline(x=float(matched.median()), line_color=COLORS["match"],
-                      annotation_text=f"mediana {matched.median():.1f}%")
-    fig.update_layout(barmode="overlay", height=340, title=f"Distribuicao do retorno em {window}",
-                      xaxis_title="retorno (%)", margin=dict(l=10, r=10, t=40, b=10),
-                      legend=dict(orientation="h", y=1.12))
+    fig.add_trace(go.Scatter(x=b.index, y=b.values, name="BTC (esq, log)",
+                             line=dict(color=COLORS["base"], width=1.4)))
+    fig.add_trace(go.Scatter(x=m.index, y=m.values, name=f"M2 global +{lead}d (dir)",
+                             line=dict(color=COLORS["match"], width=2), yaxis="y2"))
+    fig.update_layout(
+        height=520, margin=dict(l=10, r=10, t=40, b=10),
+        title=f"M2 global deslocado {lead} dias para a frente sobre o preco do BTC",
+        yaxis=dict(title="BTC (US$)", type="log"),
+        yaxis2=dict(title="M2 global (US$ tri)", overlaying="y", side="right", showgrid=False),
+        legend=dict(orientation="h", y=1.1),
+    )
     return fig
 
 
@@ -255,6 +228,16 @@ def funnel(active, targets, bands_used, index, gap):
     return pd.DataFrame([cabeca] + rows), gargalo
 
 
+def tabela_holder(panel: pd.DataFrame, windows: dict, date_range) -> pd.DataFrame:
+    """Comprar em qualquer dia do periodo e segurar - a referencia a bater."""
+    h = engine.holder(panel, windows, date_range)
+    h.attrs = {}  # carregam Timestamps que o Arrow nao serializa
+    return h[["janela", "n_dias", "media_%", "mediana_%", "desvio_%", "p10_%", "p90_%",
+              "acerto_%"]].rename(columns={
+        "janela": "Janela", "n_dias": "Dias", "media_%": "Media %", "mediana_%": "Mediana %",
+        "desvio_%": "Desvio %", "p10_%": "P10 %", "p90_%": "P90 %", "acerto_%": "Positivos %"})
+
+
 def mostrar_lead(det: pd.DataFrame, align: bool):
     """Mostra o shift de cada janela e avisa quando o lead alvo e inalcancavel.
 
@@ -283,11 +266,12 @@ def mostrar_lead(det: pd.DataFrame, align: bool):
 
 def show_table(table: pd.DataFrame):
     cols = ["janela", "n_dias", "n_episodios", "media_%", "mediana_%", "desvio_%",
-            "p10_%", "p90_%", "acerto_%", "baseline_mediana_%"]
-    nice = table[cols].rename(columns={
+            "p10_%", "p90_%", "acerto_%", "holder_mediana_%", "vantagem_pp"]
+    nice = table[[c for c in cols if c in table]].rename(columns={
         "janela": "Janela", "n_dias": "Dias", "n_episodios": "Episodios", "media_%": "Media %",
         "mediana_%": "Mediana %", "desvio_%": "Desvio %", "p10_%": "P10 %", "p90_%": "P90 %",
-        "acerto_%": "Positivos %", "baseline_mediana_%": "Baseline mediana %",
+        "acerto_%": "Positivos %", "holder_mediana_%": "Holder mediana %",
+        "vantagem_pp": "Vantagem p.p.",
     })
     nice.attrs = {}  # os attrs carregam Timestamps que o Arrow nao serializa
     st.dataframe(nice, hide_index=True, width="stretch")
@@ -344,23 +328,18 @@ def main():
     )
 
     # --------------------------------------------------------- cartoes de hoje
-    cards = st.columns(5)
+    m2 = engine.m2_para_grafico(raw, params.m2_components, params.m2_lead)
+    cards = st.columns(4)
     cards[0].metric("BTC", f"US$ {panel['btc_close'].iloc[-1]:,.0f}",
                     f"{(panel['btc_close'].iloc[-1] / panel['btc_close'].iloc[-31] - 1) * 100:+.1f}% em 30d")
     from btcindex.sources.fear_greed import classify
     fng_v = inds["fng"].current
     cards[1].metric("Fear & Greed", f"{fng_v:.0f}", classify(fng_v))
-    cards[2].metric(f"M2 global {params.m2_weeks}s", f"{inds['m2_delta'].current:+.2f}%",
-                    f"lead {params.m2_lead}d")
-    cards[3].metric(f"Juro real 10a {params.real_weeks}s", f"{inds['real_yield'].current:+.2f}pp",
-                    "queda = afrouxamento")
+    mv = inds["mvrv_z"].current
+    cards[2].metric("MVRV Z-score", f"{mv:.2f}",
+                    "lucro nao realizado" if mv > 0 else "mercado no prejuizo")
     cd = inds["cycle"].current
-    cards[4].metric("Dia do ciclo", f"{cd:.0f}", f"{cd / params.cycle_days * 100:.0f}% do ciclo")
-
-    for key in ("m2_delta", "netliq_delta", "real_yield"):
-        w = engine.stale_warning(inds[key], today)
-        if w:
-            st.warning(w)
+    cards[3].metric("Dia do ciclo", f"{cd:.0f}", f"{cd / params.cycle_days * 100:.0f}% do ciclo")
 
     # ------------------------------------------------------------------- alvos
     st.sidebar.header("Alvos")
@@ -398,15 +377,15 @@ def main():
         st.info("Selecione ao menos um indicador na barra lateral.")
         return
 
-    tab_ind, tab_comp, tab_dados, tab_metodo = st.tabs(
-        ["Individual", "Composto (E)", "Dados e fontes", "Metodologia"]
+    tab_ind, tab_comp, tab_m2, tab_dados, tab_metodo = st.tabs(
+        ["Individual", "Composto (E)", "M2 global", "Dados e fontes", "Metodologia"]
     )
 
     # -------------------------------------------------------------- individual
     with tab_ind:
-        base_tbl = engine.baseline(panel, windows, date_range)
-        st.markdown("**Baseline** - todos os dias do periodo, sem nenhum filtro:")
-        show_table(base_tbl)
+        st.markdown("**Holder** - comprar em um dia qualquer do periodo e segurar. "
+                    "E a referencia que todo indicador tem que bater:")
+        st.dataframe(tabela_holder(panel, windows, date_range), hide_index=True, width="stretch")
         st.divider()
 
         for key, ind in active.items():
@@ -423,11 +402,8 @@ def main():
             match_caption(res, {key: ind}, bands, cfg)
             show_table(tbl)
             mostrar_lead(det, params.align_lead)
-            c1, c2 = st.columns([3, 2])
-            c1.plotly_chart(price_chart(panel.loc[start:], res.dates, "Dias casados sobre o preco"),
+            st.plotly_chart(price_chart(panel.loc[start:], res.dates, "Dias casados sobre o preco"),
                             width="stretch")
-            win = c2.selectbox("Janela do histograma", list(windows), index=len(windows) - 1, key=f"h_{key}")
-            c2.plotly_chart(distribution_chart(panel.loc[start:], res.dates, win), width="stretch")
             st.plotly_chart(indicator_chart(ind, targets[key], res.bands_used[key], start),
                             width="stretch")
             with st.expander("Episodios"):
@@ -476,11 +452,10 @@ def main():
         c[1].metric("Episodios independentes", len(episodes(res.dates, gap_days=gap)))
         c[2].metric("Fator de relaxamento", f"{res.factor:.2f}x")
         show_table(tbl)
-        c1, c2 = st.columns([3, 2])
-        c1.plotly_chart(price_chart(panel.loc[start:], res.dates, "Dias casados sobre o preco"),
+        st.plotly_chart(price_chart(panel.loc[start:], res.dates, "Dias casados sobre o preco"),
                         width="stretch")
-        win = c2.selectbox("Janela do histograma", list(windows), index=len(windows) - 1, key="h_comp")
-        c2.plotly_chart(distribution_chart(panel.loc[start:], res.dates, win), width="stretch")
+        st.markdown("**Holder** - a referencia a bater no mesmo periodo:")
+        st.dataframe(tabela_holder(panel, windows, date_range), hide_index=True, width="stretch")
         st.markdown("**Episodios**")
         st.dataframe(episode_table(panel.loc[start:], res.mask, windows, gap), hide_index=True,
                      width="stretch")
@@ -519,12 +494,28 @@ def main():
                 "(alargar a banda dele) se voce quiser mais dias sem relaxar todo o resto."
             )
 
+    # --------------------------------------------------------------------- m2
+    with tab_m2:
+        st.subheader("M2 global sobre o preco do bitcoin")
+        st.caption(
+            f"Agregado de {'+'.join(params.m2_components)} em USD, encadeado, deslocado "
+            f"{params.m2_lead} dias para a frente. Ele nao entra em nenhuma analise desta pagina - "
+            "esta aqui como contexto visual."
+        )
+        st.plotly_chart(m2_chart(panel["btc_close"], m2, params.m2_lead, start), width="stretch")
+        st.info(
+            "Cuidado ao ler este grafico: duas series que sobem ao longo de uma decada parecem "
+            "sempre correlacionadas. Em nivel, a correlacao com o BTC e de +0,95; em variacao, que "
+            "e o que se poderia negociar, cai para +0,08. E cerca de dois tercos da variancia do M2 "
+            "em dolar vem do proprio cambio, nao de criacao de moeda."
+        )
+
     # ------------------------------------------------------------------- dados
     with tab_dados:
         st.subheader("Cobertura das fontes")
         rows = []
         for name, s in [("BTC (Bitstamp)", raw.btc), ("Fear & Greed (alternative.me)", raw.fng),
-                        ("Net Liquidity (FRED)", raw.netliq)]:
+                        ("MVRV Z-score (Coin Metrics)", raw.mvrv_z)]:
             d = s.dropna()
             rows.append({"serie": name, "inicio": d.index.min().date(), "fim": d.index.max().date(), "obs": len(d)})
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
@@ -562,7 +553,9 @@ def main():
    atraso de 10-12 semanas entre liquidez e preco entra na conta.
 3. Selecionam-se os dias do passado em que o indicador esteve dentro da banda em torno do alvo.
 4. Calculam-se media, mediana, desvio, P10/P90 e taxa de dias positivos dos retornos futuros
-   desses dias, sempre ao lado do baseline (todos os dias do mesmo periodo).
+   desses dias, sempre ao lado do **holder**: comprar num dia qualquer do mesmo periodo e
+   segurar. A coluna *Vantagem p.p.* e a diferenca entre os dois - se ela for perto de zero,
+   o indicador nao esta acrescentando nada ao simples fato de o bitcoin ter subido.
 
 ### O lead e medido de centro a centro
 
