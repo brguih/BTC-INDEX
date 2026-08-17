@@ -327,14 +327,26 @@ def holder(df: pd.DataFrame, windows: dict[str, int], date_range=None) -> pd.Dat
     return stats.summarize(scope, pd.Series(True, index=scope.index), windows, gap_days=10**6)
 
 
+def m2_ultimo_dado_real(raw: RawData, componentes=None) -> pd.Timestamp:
+    """Ultima data em que algum componente do M2 foi de fato publicado."""
+    comps = [c for c in (componentes or raw.m2_components.columns) if c in raw.m2_components.columns]
+    return raw.m2_components[comps].dropna(how="all").index.max()
+
+
 def m2_para_grafico(raw: RawData, componentes=None, lead_dias: int = 0) -> pd.Series:
     """Nivel do M2 global em US$ trilhoes, deslocado `lead_dias` para a frente.
 
     Deslocar para a frente e o que materializa a tese: o M2 de hoje aparece no
     grafico na data em que se espera que o bitcoin reaja a ele.
+
+    A serie e cortada no ultimo dado realmente publicado. O agregado diario e
+    preenchido por repeticao ate hoje para as contas internas, mas desenhar esse
+    trecho seria mostrar uma linha chapada de varias semanas com cara de previsao
+    de estagnacao, quando e apenas ausencia de dado.
     """
     comps = [c for c in (componentes or raw.m2_components.columns) if c in raw.m2_components.columns]
     nivel = global_m2.chain_link(raw.m2_components[comps])
+    nivel = nivel.loc[: m2_ultimo_dado_real(raw, comps)]
     if lead_dias:
         nivel = nivel.copy()
         nivel.index = nivel.index + pd.Timedelta(days=int(lead_dias))

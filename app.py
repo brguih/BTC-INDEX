@@ -164,19 +164,50 @@ def price_chart(df: pd.DataFrame, dates: pd.DatetimeIndex, title: str) -> go.Fig
     return fig
 
 
-def m2_chart(btc: pd.Series, m2: pd.Series, lead: int, start: pd.Timestamp) -> go.Figure:
-    """M2 global deslocado sobre o preco do BTC, eixo duplo, preco em log."""
-    b = btc.loc[start:]
-    m = m2.loc[start:]
+JANELAS_M2 = {"90 dias": 90, "180 dias": 180, "1 ano": 365, "2 anos": 730,
+              "5 anos": 1825, "todo o historico": None}
+
+
+def m2_chart(btc: pd.Series, m2: pd.Series, lead: int, dias: int | None,
+             inicio_amostra: pd.Timestamp) -> go.Figure:
+    """M2 global deslocado sobre o preco do BTC, eixo duplo.
+
+    A serie do M2 e cortada em duas: solida ate hoje (o que ja da para conferir
+    contra o preco) e tracejada dali para a frente (a parte que e projecao). Sem
+    essa separacao o olho le a projecao como se fosse historico.
+    """
+    hoje = btc.index.max()
+    inicio = inicio_amostra if dias is None else hoje - pd.Timedelta(days=int(dias))
+    b = btc.loc[inicio:]
+    m = m2.loc[inicio:]
+    observado, projetado = m.loc[:hoje], m.loc[hoje:]
+
+    # log so ganha algo quando o preco varia varias vezes dentro da janela
+    escala = "log" if (dias is None or dias > 730) else "linear"
+
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=b.index, y=b.values, name="BTC (esq, log)",
-                             line=dict(color=COLORS["base"], width=1.4)))
-    fig.add_trace(go.Scatter(x=m.index, y=m.values, name=f"M2 global +{lead}d (dir)",
-                             line=dict(color=COLORS["match"], width=2), yaxis="y2"))
+    fig.add_trace(go.Scatter(x=b.index, y=b.values, name="BTC",
+                             line=dict(color=COLORS["base"], width=1.6)))
+    fig.add_trace(go.Scatter(x=observado.index, y=observado.values, yaxis="y2",
+                             name=f"M2 global +{lead}d",
+                             line=dict(color=COLORS["match"], width=2.2)))
+    if len(projetado) > 1:
+        fig.add_trace(go.Scatter(x=projetado.index, y=projetado.values, yaxis="y2",
+                                 name="M2 projetado",
+                                 line=dict(color=COLORS["match"], width=2.2, dash="dash")))
+        # add_vline com anotacao quebra no plotly 6.x quando x e um Timestamp
+        # (faz aritmetica de inteiro com a data); shape + annotation separados evitam isso
+        fig.add_shape(type="line", x0=hoje, x1=hoje, xref="x", yref="paper", y0=0, y1=1,
+                      line=dict(color="#888", width=1, dash="dot"))
+        fig.add_annotation(x=hoje, y=1.02, xref="x", yref="paper", text="hoje",
+                           showarrow=False, font=dict(size=11, color="#888"))
+
+    fim = max(b.index.max(), m.index.max())
     fig.update_layout(
         height=520, margin=dict(l=10, r=10, t=40, b=10),
         title=f"M2 global deslocado {lead} dias para a frente sobre o preco do BTC",
-        yaxis=dict(title="BTC (US$)", type="log"),
+        xaxis=dict(range=[inicio, fim]),
+        yaxis=dict(title="BTC (US$)", type=escala),
         yaxis2=dict(title="M2 global (US$ tri)", overlaying="y", side="right", showgrid=False),
         legend=dict(orientation="h", y=1.1),
     )
@@ -502,7 +533,26 @@ def main():
             f"{params.m2_lead} dias para a frente. Ele nao entra em nenhuma analise desta pagina - "
             "esta aqui como contexto visual."
         )
-        st.plotly_chart(m2_chart(panel["btc_close"], m2, params.m2_lead, start), width="stretch")
+        c1, c2 = st.columns([1, 2])
+        escolha = c1.selectbox("Janela de exibicao", [*JANELAS_M2, "personalizado"],
+                               index=2, key="m2win")
+        if escolha == "personalizado":
+            dias_janela = int(c2.number_input("Dias exibidos (passado)", 30, 6000, 365, 10,
+                                              key="m2win_dias"))
+        else:
+            dias_janela = JANELAS_M2[escolha]
+        if dias_janela is not None:
+            c2.caption(f"Mostra {dias_janela} dias de passado mais os {params.m2_lead} dias de "
+                       "projecao do M2 a direita.")
+
+        st.plotly_chart(m2_chart(panel["btc_close"], m2, params.m2_lead, dias_janela, start),
+                        width="stretch")
+        ultimo_real = engine.m2_ultimo_dado_real(raw, params.m2_components)
+        st.caption(
+            f"Linha solida = M2 ja sobreposto ao preco. Tracejada = projecao, o M2 publicado ate "
+            f"{ultimo_real:%d/%m/%Y} deslocado para a frente. A serie termina no ultimo dado real: "
+            "nao ha trecho chapado fingindo ser previsao."
+        )
         st.info(
             "Cuidado ao ler este grafico: duas series que sobem ao longo de uma decada parecem "
             "sempre correlacionadas. Em nivel, a correlacao com o BTC e de +0,95; em variacao, que "
